@@ -7,6 +7,7 @@ export class MapBuilder {
   private trackWidth: number = 8; // Increased track width
   private terrainObjects: THREE.Object3D[] = [];
   private groundMesh: THREE.Mesh | null = null;
+  private trackPoints: THREE.Vector2[] = [];
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
@@ -30,7 +31,6 @@ export class MapBuilder {
     this.createGround();
     this.createTrack();
     this.addDecorations();
-    this.createHills();
   }
 
   private createGround(): void {
@@ -83,7 +83,7 @@ export class MapBuilder {
 
   private createTrack(): void {
     // Create a flat dirt track using a path extruded with minimal height
-    const trackPoints = this.trackPath.getPoints(200); // More points for smoother track
+    this.trackPoints = this.trackPath.getPoints(200); // Store track points for later use
 
     // Create a flat track by using a ribbon of triangles along the path
     const trackVertices = [];
@@ -91,9 +91,9 @@ export class MapBuilder {
     const trackIndices = [];
 
     // Create vertices for the track (a flat ribbon along the path)
-    for (let i = 0; i < trackPoints.length; i++) {
-      const point = trackPoints[i];
-      const nextPoint = trackPoints[(i + 1) % trackPoints.length];
+    for (let i = 0; i < this.trackPoints.length; i++) {
+      const point = this.trackPoints[i];
+      const nextPoint = this.trackPoints[(i + 1) % this.trackPoints.length];
 
       // Calculate direction vector
       const dirX = nextPoint.x - point.x;
@@ -126,11 +126,11 @@ export class MapBuilder {
       );
 
       // UVs for texture mapping
-      trackUVs.push(0, i / trackPoints.length);
-      trackUVs.push(1, i / trackPoints.length);
+      trackUVs.push(0, i / this.trackPoints.length);
+      trackUVs.push(1, i / this.trackPoints.length);
 
       // Create triangles (two per segment)
-      if (i < trackPoints.length - 1) {
+      if (i < this.trackPoints.length - 1) {
         const vertexIndex = i * 2;
 
         // First triangle
@@ -203,8 +203,21 @@ export class MapBuilder {
       const x = Math.cos(angle) * distance;
       const z = Math.sin(angle) * distance;
 
-      // Check if the hill would intersect with the track
-      if (!this.isPointOnTrack(x, z)) {
+      // Check if any part of the hill would intersect with the track
+      // Consider the hill's radius when checking for track intersection
+      let isValidPosition = true;
+      const checkPoints = 8; // Number of points to check around the hill's perimeter
+      for (let i = 0; i < checkPoints; i++) {
+        const checkAngle = (i / checkPoints) * Math.PI * 2;
+        const checkX = x + Math.cos(checkAngle) * radius;
+        const checkZ = z + Math.sin(checkAngle) * radius;
+        if (this.isPointOnTrack(checkX, checkZ)) {
+          isValidPosition = false;
+          break;
+        }
+      }
+
+      if (isValidPosition) {
         hill.position.set(x, 0, z);
         hill.scale.y = height;
         hill.receiveShadow = true;
@@ -219,118 +232,88 @@ export class MapBuilder {
     }
   }
 
-  private addTerrainVariations(): void {
-    // Create small bumps and texture variations on the ground
-    for (let i = 0; i < 100; i++) {
-      const radius = 1 + Math.random() * 4;
-      const height = 0.05 + Math.random() * 0.2;
 
-      const bumpGeometry = new THREE.SphereGeometry(radius, 8, 8, 0, Math.PI * 2, 0, Math.PI / 2);
-      const bumpMaterial = new THREE.MeshStandardMaterial({
-        color: 0x355E3B, // Match ground color
-        roughness: 0.9,
-        metalness: 0.1
-      });
-
-      const bump = new THREE.Mesh(bumpGeometry, bumpMaterial);
-
-      // Position bumps randomly across the terrain
-      const distance = Math.random() * 90;
-      const angle = Math.random() * Math.PI * 2;
-
-      bump.position.set(
-        Math.cos(angle) * distance,
-        0.01, // Just above ground
-        Math.sin(angle) * distance
-      );
-
-      bump.scale.y = height;
-      bump.receiveShadow = true;
-
-      this.scene.add(bump);
-
-      // Add bump to terrain objects for raycasting
-      this.terrainObjects.push(bump);
-    }
-  }
 
   private addDecorations(): void {
+    // Add finish line
+    this.addFinishLine();
+
     // Add trees
     this.addTrees();
 
     // Add rocks
     this.addRocks();
 
-    // Add finish line
-    this.addFinishLine();
-
-    // Add terrain variations for better ground contact
-    this.addTerrainVariations();
+    // Create Hills
+    this.createHills();
   }
 
   private addTrees(): void {
-    // Add trees around the track
-    for (let i = 0; i < 30; i++) {
-      const treeHeight = 3 + Math.random() * 2;
-      const trunkRadius = 0.2 + Math.random() * 0.1;
+    const treeCount = 50;
+    let treesCreated = 0;
+    let attempts = 0;
+    const maxAttempts = 200;
 
-      // Create tree trunk
-      const trunkGeometry = new THREE.CylinderGeometry(trunkRadius, trunkRadius * 1.2, treeHeight, 8);
+    while (treesCreated < treeCount && attempts < maxAttempts) {
+      // Tree trunk
+      const trunkGeometry = new THREE.CylinderGeometry(0.3, 0.5, 2, 8);
       const trunkMaterial = new THREE.MeshStandardMaterial({
-        color: 0x4A2B0F, // Brown color for trunk
+        color: 0x8B4513,
         roughness: 0.9,
         metalness: 0.1
       });
       const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
 
-      // Create tree top (leaves)
-      const leavesGeometry = new THREE.ConeGeometry(treeHeight / 2, treeHeight, 8);
-      const leavesMaterial = new THREE.MeshStandardMaterial({
-        color: 0x2D5A27, // Dark green for leaves
+      // Tree top (cone)
+      const topGeometry = new THREE.ConeGeometry(2, 4, 8);
+      const topMaterial = new THREE.MeshStandardMaterial({
+        color: 0x228B22,
         roughness: 0.8,
         metalness: 0.1
       });
-      const leaves = new THREE.Mesh(leavesGeometry, leavesMaterial);
-      leaves.position.y = treeHeight / 2;
+      const top = new THREE.Mesh(topGeometry, topMaterial);
+      top.position.y = 3;
 
       // Create tree group
       const tree = new THREE.Group();
       tree.add(trunk);
-      tree.add(leaves);
+      tree.add(top);
 
-      // Position tree randomly but away from track
-      let validPosition = false;
-      let attempts = 0;
-      while (!validPosition && attempts < 50) {
-        const distance = 40 + Math.random() * 50;
-        const angle = Math.random() * Math.PI * 2;
-        const x = Math.cos(angle) * distance;
-        const z = Math.sin(angle) * distance;
+      // Position trees randomly but away from track
+      const distance = 30 + Math.random() * 70;
+      const angle = Math.random() * Math.PI * 2;
+      const x = Math.cos(angle) * distance;
+      const z = Math.sin(angle) * distance;
 
-        if (!this.isPointOnTrack(x, z)) {
-          tree.position.set(x, 0, z);
-          validPosition = true;
-        }
-        attempts++;
-      }
-
-      if (validPosition) {
+      if (!this.isPointOnTrack(x, z)) {
+        tree.position.set(x, 0, z);
+        tree.scale.set(
+          0.8 + Math.random() * 0.4,
+          0.8 + Math.random() * 0.4,
+          0.8 + Math.random() * 0.4
+        );
+        tree.rotation.y = Math.random() * Math.PI * 2;
         tree.castShadow = true;
         tree.receiveShadow = true;
+
         this.scene.add(tree);
         this.terrainObjects.push(tree);
+        treesCreated++;
       }
+      attempts++;
     }
   }
 
   private addRocks(): void {
-    // Add rocks around the track
-    for (let i = 0; i < 20; i++) {
-      const rockSize = 1 + Math.random() * 2;
+    const rockCount = 30;
+    let rocksCreated = 0;
+    let attempts = 0;
+    const maxAttempts = 150;
 
-      const rockGeometry = new THREE.DodecahedronGeometry(rockSize, 1);
+    while (rocksCreated < rockCount && attempts < maxAttempts) {
+      const rockGeometry = new THREE.DodecahedronGeometry(1 + Math.random());
       const rockMaterial = new THREE.MeshStandardMaterial({
-        color: 0x808080, // Gray color for rocks
+        color: 0x808080,
         roughness: 0.9,
         metalness: 0.2
       });
@@ -338,34 +321,35 @@ export class MapBuilder {
       const rock = new THREE.Mesh(rockGeometry, rockMaterial);
 
       // Position rocks randomly but away from track
-      let validPosition = false;
-      let attempts = 0;
-      while (!validPosition && attempts < 50) {
-        const distance = 35 + Math.random() * 45;
-        const angle = Math.random() * Math.PI * 2;
-        const x = Math.cos(angle) * distance;
-        const z = Math.sin(angle) * distance;
+      const distance = 25 + Math.random() * 75;
+      const angle = Math.random() * Math.PI * 2;
+      const x = Math.cos(angle) * distance;
+      const z = Math.sin(angle) * distance;
 
-        if (!this.isPointOnTrack(x, z)) {
-          rock.position.set(x, rockSize / 2, z);
-          validPosition = true;
-        }
-        attempts++;
-      }
-
-      if (validPosition) {
-        // Add some random rotation for variety
-        rock.rotation.x = Math.random() * Math.PI;
-        rock.rotation.y = Math.random() * Math.PI;
-        rock.rotation.z = Math.random() * Math.PI;
-
+      if (!this.isPointOnTrack(x, z)) {
+        rock.position.set(x, 0, z);
+        rock.scale.set(
+          0.5 + Math.random() * 1.5,
+          0.5 + Math.random() * 1.5,
+          0.5 + Math.random() * 1.5
+        );
+        rock.rotation.set(
+          Math.random() * Math.PI,
+          Math.random() * Math.PI,
+          Math.random() * Math.PI
+        );
         rock.castShadow = true;
         rock.receiveShadow = true;
+
         this.scene.add(rock);
         this.terrainObjects.push(rock);
+        rocksCreated++;
       }
+      attempts++;
     }
   }
+
+
 
   private addFinishLine(): void {
     // Create finish line markers
@@ -416,13 +400,10 @@ export class MapBuilder {
   }
   // Method to check if a point is on the track
   public isPointOnTrack(x: number, z: number): boolean {
-    // Get track points
-    const trackPoints = this.trackPath.getPoints(200);
-
-    // Find the closest point on the track
+    // Use stored track points for efficient checking
     let minDistance = Infinity;
 
-    for (const point of trackPoints) {
+    for (const point of this.trackPoints) {
       const distance = Math.sqrt(Math.pow(point.x - x, 2) + Math.pow(point.y - z, 2));
       if (distance < minDistance) {
         minDistance = distance;
