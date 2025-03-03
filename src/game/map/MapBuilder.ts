@@ -173,86 +173,9 @@ export class MapBuilder {
     // Add track to terrain objects for raycasting
     this.terrainObjects.push(this.trackMesh);
 
-    // Add track markings
-    this.addTrackMarkings();
-
-    // Add tire marks and dirt details to make the track look more used
-    this.addTrackDetails();
   }
 
-  private addTrackDetails(): void {
-    if (!this.trackMesh) return;
 
-    // Add random tire marks and dirt patches along the track
-    const trackPoints = this.trackPath.getPoints(100);
-
-    // Create tire marks
-    for (let i = 0; i < 50; i++) {
-      // Pick a random point along the track
-      const pointIndex = Math.floor(Math.random() * trackPoints.length);
-      const point = trackPoints[pointIndex];
-
-      // Random offset from center of track
-      const offset = (Math.random() - 0.5) * this.trackWidth * 0.7;
-
-      // Create a tire mark (dark streak)
-      const markWidth = 0.1 + Math.random() * 0.2;
-      const markLength = 1 + Math.random() * 3;
-
-      const markGeometry = new THREE.PlaneGeometry(markWidth, markLength);
-      const markMaterial = new THREE.MeshStandardMaterial({
-        color: 0x333333,
-        transparent: true,
-        opacity: 0.3 + Math.random() * 0.3,
-        roughness: 0.9
-      });
-
-      const mark = new THREE.Mesh(markGeometry, markMaterial);
-
-      // Position and rotate the mark
-      mark.position.set(point.x + offset, 0.002, point.y);
-      mark.rotation.x = -Math.PI / 2;
-      mark.rotation.z = Math.random() * Math.PI * 2;
-
-      this.scene.add(mark);
-    }
-
-    // Add dirt piles at track edges
-    for (let i = 0; i < 80; i++) {
-      // Pick a random point along the track
-      const pointIndex = Math.floor(Math.random() * trackPoints.length);
-      const point = trackPoints[pointIndex];
-
-      // Position at track edge
-      const edgeOffset = (this.trackWidth / 2) * (Math.random() > 0.5 ? 1 : -1);
-      const inwardOffset = Math.random() * 0.5; // Pull slightly inward from edge
-
-      // Create a small dirt pile
-      const pileRadius = 0.2 + Math.random() * 0.4;
-      const pileHeight = 0.05 + Math.random() * 0.1;
-
-      const pileGeometry = new THREE.SphereGeometry(pileRadius, 8, 4, 0, Math.PI * 2, 0, Math.PI / 2);
-      const pileMaterial = new THREE.MeshStandardMaterial({
-        color: 0x8B4513, // Match track color
-        roughness: 1.0
-      });
-
-      const pile = new THREE.Mesh(pileGeometry, pileMaterial);
-
-      // Position the pile at track edge
-      pile.position.set(
-        point.x + (edgeOffset - inwardOffset * Math.sign(edgeOffset)),
-        0,
-        point.y
-      );
-
-      pile.scale.y = pileHeight / pileRadius;
-      pile.receiveShadow = true;
-
-      this.scene.add(pile);
-      this.terrainObjects.push(pile);
-    }
-  }
 
   private createHills(): void {
     // Create larger hills that the car can drive over
@@ -288,40 +211,6 @@ export class MapBuilder {
       // Add hill to terrain objects for raycasting
       this.terrainObjects.push(hill);
     }
-  }
-
-  private addTrackMarkings(): void {
-    if (!this.trackMesh) return;
-
-    // Create a smaller shape for the center line
-    const lineShape = this.trackPath.clone();
-
-    // Create dashed line geometry
-    const points = lineShape.getPoints(200);
-    const dashGeometry = new THREE.BufferGeometry();
-
-    // Create dashed line effect by using only some of the points
-    const dashPoints: THREE.Vector3[] = [];
-    for (let i = 0; i < points.length; i++) {
-      // Add point only for every other segment to create dashed effect
-      if (i % 8 < 4) {
-        dashPoints.push(new THREE.Vector3(points[i].x, 0.002, points[i].y));
-      }
-    }
-
-    dashGeometry.setFromPoints(dashPoints);
-
-    // Create line material
-    const lineMaterial = new THREE.LineBasicMaterial({
-      color: 0xffffff,
-      opacity: 0.5,
-      transparent: true
-    });
-
-    // Create line mesh
-    const line = new THREE.Line(dashGeometry, lineMaterial);
-
-    this.scene.add(line);
   }
 
   private addTerrainVariations(): void {
