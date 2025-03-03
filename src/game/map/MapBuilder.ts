@@ -15,15 +15,15 @@ export class MapBuilder {
   }
 
   private initializeTrackPath(): void {
-    // Create a larger, more complex track
+    // Create a larger, more complex track with smoother curves
     this.trackPath.moveTo(0, 0);
 
-    // Create a larger track with more curves and features
-    this.trackPath.bezierCurveTo(20, -20, 30, -30, 0, -40);
-    this.trackPath.bezierCurveTo(-30, -50, -40, -30, 0, -20);
-    this.trackPath.bezierCurveTo(20, -10, 40, 10, 20, 30);
-    this.trackPath.bezierCurveTo(0, 50, -30, 40, -40, 20);
-    this.trackPath.bezierCurveTo(-50, 0, -30, -10, 0, 0);
+    // Create a larger track with more natural curves and features
+    this.trackPath.bezierCurveTo(30, 0, 40, -20, 40, -40);
+    this.trackPath.bezierCurveTo(40, -60, 20, -70, 0, -60);
+    this.trackPath.bezierCurveTo(-20, -50, -40, -20, -40, 0);
+    this.trackPath.bezierCurveTo(-40, 20, -20, 40, 0, 40);
+    this.trackPath.bezierCurveTo(20, 40, 30, 20, 0, 0);
   }
 
   public buildMap(): void {
@@ -179,7 +179,11 @@ export class MapBuilder {
 
   private createHills(): void {
     // Create larger hills that the car can drive over
-    for (let i = 0; i < 15; i++) {
+    let attempts = 0;
+    let hillsCreated = 0;
+    const maxAttempts = 100; // Prevent infinite loops
+
+    while (hillsCreated < 15 && attempts < maxAttempts) {
       const radius = 8 + Math.random() * 15;
       const height = 1 + Math.random() * 4;
 
@@ -196,20 +200,22 @@ export class MapBuilder {
       const distance = 30 + Math.random() * 60;
       const angle = Math.random() * Math.PI * 2;
 
-      hill.position.set(
-        Math.cos(angle) * distance,
-        0,
-        Math.sin(angle) * distance
-      );
+      const x = Math.cos(angle) * distance;
+      const z = Math.sin(angle) * distance;
 
-      hill.scale.y = height;
-      hill.receiveShadow = true;
-      hill.castShadow = true;
+      // Check if the hill would intersect with the track
+      if (!this.isPointOnTrack(x, z)) {
+        hill.position.set(x, 0, z);
+        hill.scale.y = height;
+        hill.receiveShadow = true;
+        hill.castShadow = true;
 
-      this.scene.add(hill);
+        this.scene.add(hill);
+        this.terrainObjects.push(hill);
+        hillsCreated++;
+      }
 
-      // Add hill to terrain objects for raycasting
-      this.terrainObjects.push(hill);
+      attempts++;
     }
   }
 
@@ -263,143 +269,151 @@ export class MapBuilder {
   }
 
   private addTrees(): void {
-    // Create simple trees using cones and cylinders
-    for (let i = 0; i < 40; i++) {
-      const treeGroup = new THREE.Group();
+    // Add trees around the track
+    for (let i = 0; i < 30; i++) {
+      const treeHeight = 3 + Math.random() * 2;
+      const trunkRadius = 0.2 + Math.random() * 0.1;
 
-      // Tree trunk
-      const trunkGeometry = new THREE.CylinderGeometry(0.2, 0.3, 1, 8);
+      // Create tree trunk
+      const trunkGeometry = new THREE.CylinderGeometry(trunkRadius, trunkRadius * 1.2, treeHeight, 8);
       const trunkMaterial = new THREE.MeshStandardMaterial({
-        color: 0x8b4513, // Brown
-        roughness: 0.9
+        color: 0x4A2B0F, // Brown color for trunk
+        roughness: 0.9,
+        metalness: 0.1
       });
       const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
-      trunk.position.y = 0.5;
-      trunk.castShadow = true;
-      trunk.receiveShadow = true;
-      treeGroup.add(trunk);
 
-      // Tree top
-      const topGeometry = new THREE.ConeGeometry(1, 2, 8);
-      const topMaterial = new THREE.MeshStandardMaterial({
-        color: 0x228b22, // Forest green
-        roughness: 0.8
+      // Create tree top (leaves)
+      const leavesGeometry = new THREE.ConeGeometry(treeHeight / 2, treeHeight, 8);
+      const leavesMaterial = new THREE.MeshStandardMaterial({
+        color: 0x2D5A27, // Dark green for leaves
+        roughness: 0.8,
+        metalness: 0.1
       });
-      const top = new THREE.Mesh(topGeometry, topMaterial);
-      top.position.y = 2;
-      top.castShadow = true;
-      top.receiveShadow = true;
-      treeGroup.add(top);
+      const leaves = new THREE.Mesh(leavesGeometry, leavesMaterial);
+      leaves.position.y = treeHeight / 2;
 
-      // Position trees randomly but away from the track
-      const distance = 40 + Math.random() * 60;
-      const angle = Math.random() * Math.PI * 2;
+      // Create tree group
+      const tree = new THREE.Group();
+      tree.add(trunk);
+      tree.add(leaves);
 
-      treeGroup.position.set(
-        Math.cos(angle) * distance,
-        0,
-        Math.sin(angle) * distance
-      );
+      // Position tree randomly but away from track
+      let validPosition = false;
+      let attempts = 0;
+      while (!validPosition && attempts < 50) {
+        const distance = 40 + Math.random() * 50;
+        const angle = Math.random() * Math.PI * 2;
+        const x = Math.cos(angle) * distance;
+        const z = Math.sin(angle) * distance;
 
-      this.scene.add(treeGroup);
+        if (!this.isPointOnTrack(x, z)) {
+          tree.position.set(x, 0, z);
+          validPosition = true;
+        }
+        attempts++;
+      }
+
+      if (validPosition) {
+        tree.castShadow = true;
+        tree.receiveShadow = true;
+        this.scene.add(tree);
+        this.terrainObjects.push(tree);
+      }
     }
   }
 
   private addRocks(): void {
-    // Create rocks using irregular geometries
-    for (let i = 0; i < 30; i++) {
-      const rockGeometry = new THREE.DodecahedronGeometry(0.5 + Math.random() * 1.5, 0);
+    // Add rocks around the track
+    for (let i = 0; i < 20; i++) {
+      const rockSize = 1 + Math.random() * 2;
+
+      const rockGeometry = new THREE.DodecahedronGeometry(rockSize, 1);
       const rockMaterial = new THREE.MeshStandardMaterial({
-        color: 0x808080, // Gray
+        color: 0x808080, // Gray color for rocks
         roughness: 0.9,
-        metalness: 0.1
+        metalness: 0.2
       });
 
       const rock = new THREE.Mesh(rockGeometry, rockMaterial);
 
-      // Deform rock to make it look more natural
-      const positionAttribute = rockGeometry.getAttribute('position');
-      const vertex = new THREE.Vector3();
+      // Position rocks randomly but away from track
+      let validPosition = false;
+      let attempts = 0;
+      while (!validPosition && attempts < 50) {
+        const distance = 35 + Math.random() * 45;
+        const angle = Math.random() * Math.PI * 2;
+        const x = Math.cos(angle) * distance;
+        const z = Math.sin(angle) * distance;
 
-      for (let j = 0; j < positionAttribute.count; j++) {
-        vertex.fromBufferAttribute(positionAttribute, j);
-
-        vertex.x += (Math.random() - 0.5) * 0.2;
-        vertex.y += (Math.random() - 0.5) * 0.2;
-        vertex.z += (Math.random() - 0.5) * 0.2;
-
-        positionAttribute.setXYZ(j, vertex.x, vertex.y, vertex.z);
+        if (!this.isPointOnTrack(x, z)) {
+          rock.position.set(x, rockSize / 2, z);
+          validPosition = true;
+        }
+        attempts++;
       }
 
-      rockGeometry.computeVertexNormals();
+      if (validPosition) {
+        // Add some random rotation for variety
+        rock.rotation.x = Math.random() * Math.PI;
+        rock.rotation.y = Math.random() * Math.PI;
+        rock.rotation.z = Math.random() * Math.PI;
 
-      // Position rocks randomly
-      const distance = 20 + Math.random() * 70;
-      const angle = Math.random() * Math.PI * 2;
-
-      rock.position.set(
-        Math.cos(angle) * distance,
-        0.25,
-        Math.sin(angle) * distance
-      );
-
-      // Random rotation and scale
-      rock.rotation.set(
-        Math.random() * Math.PI,
-        Math.random() * Math.PI,
-        Math.random() * Math.PI
-      );
-
-      const scale = 0.5 + Math.random() * 2;
-      rock.scale.set(scale, scale * 0.8, scale);
-
-      rock.castShadow = true;
-      rock.receiveShadow = true;
-
-      this.scene.add(rock);
-
-      // Add rock to terrain objects for raycasting
-      this.terrainObjects.push(rock);
+        rock.castShadow = true;
+        rock.receiveShadow = true;
+        this.scene.add(rock);
+        this.terrainObjects.push(rock);
+      }
     }
   }
 
   private addFinishLine(): void {
-    // Create a finish line near the start of the track
-    const finishGeometry = new THREE.PlaneGeometry(this.trackWidth - 1, 2);
-    const finishMaterial = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      roughness: 0.5,
-      metalness: 0.2
+    // Create finish line markers
+    const markerHeight = 5;
+    const markerWidth = this.trackWidth * 1.2;
+    const markerDepth = 0.3;
+
+    // Create two pillars for the finish line
+    const pillarGeometry = new THREE.BoxGeometry(markerDepth, markerHeight, markerDepth);
+    const pillarMaterial = new THREE.MeshStandardMaterial({
+      color: 0xFFFFFF, // White color
+      roughness: 0.7,
+      metalness: 0.3
     });
 
-    // Create checkerboard pattern
-    const textureSize = 8;
-    const data = new Uint8Array(textureSize * textureSize * 3);
+    // Left pillar
+    const leftPillar = new THREE.Mesh(pillarGeometry, pillarMaterial);
+    leftPillar.position.set(-markerWidth / 2, markerHeight / 2, 0);
 
-    for (let i = 0; i < textureSize; i++) {
-      for (let j = 0; j < textureSize; j++) {
-        const index = (i * textureSize + j) * 3;
-        const isWhite = (i + j) % 2 === 0;
+    // Right pillar
+    const rightPillar = new THREE.Mesh(pillarGeometry, pillarMaterial);
+    rightPillar.position.set(markerWidth / 2, markerHeight / 2, 0);
 
-        data[index] = isWhite ? 255 : 0;
-        data[index + 1] = isWhite ? 255 : 0;
-        data[index + 2] = isWhite ? 255 : 0;
-      }
-    }
+    // Top banner
+    const bannerGeometry = new THREE.BoxGeometry(markerWidth, markerDepth * 2, markerDepth);
+    const bannerMaterial = new THREE.MeshStandardMaterial({
+      color: 0xFF0000, // Red color
+      roughness: 0.7,
+      metalness: 0.3
+    });
 
-    const texture = new THREE.DataTexture(data, textureSize, textureSize, THREE.RGBAFormat);
-    texture.needsUpdate = true;
+    const banner = new THREE.Mesh(bannerGeometry, bannerMaterial);
+    banner.position.set(0, markerHeight, 0);
 
-    finishMaterial.map = texture;
+    // Create finish line group
+    const finishLine = new THREE.Group();
+    finishLine.add(leftPillar);
+    finishLine.add(rightPillar);
+    finishLine.add(banner);
 
-    const finishLine = new THREE.Mesh(finishGeometry, finishMaterial);
-    finishLine.rotation.x = -Math.PI / 2;
-    finishLine.position.set(0, 0.002, 0); // Just above ground to prevent z-fighting
+    // Position at the start of the track
+    finishLine.position.set(0, 0, -this.trackWidth / 2);
+    finishLine.castShadow = true;
     finishLine.receiveShadow = true;
 
     this.scene.add(finishLine);
+    this.terrainObjects.push(finishLine);
   }
-
   // Method to check if a point is on the track
   public isPointOnTrack(x: number, z: number): boolean {
     // Get track points
@@ -415,8 +429,9 @@ export class MapBuilder {
       }
     }
 
-    // Check if the point is within the track width
-    return minDistance <= this.trackWidth;
+    // Add a buffer to prevent objects from being too close to the track
+    const bufferWidth = this.trackWidth * 1.2;
+    return minDistance <= bufferWidth;
   }
 
   // Get all terrain objects for raycasting
