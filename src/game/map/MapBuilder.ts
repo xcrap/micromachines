@@ -4,7 +4,7 @@ export class MapBuilder {
   private scene: THREE.Scene;
   private trackMesh: THREE.Mesh | null = null;
   private trackPath: THREE.Shape;
-  private trackWidth: number = 8; // Increased track width
+  private trackWidth: number = 10; // Increased track width
   private terrainObjects: THREE.Object3D[] = [];
   private groundMesh: THREE.Mesh | null = null;
   private trackPoints: THREE.Vector2[] = [];
@@ -114,14 +114,14 @@ export class MapBuilder {
       // Left side vertex
       trackVertices.push(
         point.x + perpX * halfWidth,
-        0.001, // Just slightly above ground to prevent z-fighting
+        0.01, // Increased height to prevent z-fighting at distance
         point.y + perpY * halfWidth
       );
 
       // Right side vertex
       trackVertices.push(
         point.x - perpX * halfWidth,
-        0.001,
+        0.01,
         point.y - perpY * halfWidth
       );
 
@@ -156,12 +156,16 @@ export class MapBuilder {
       bumpScale: 0.02
     };
 
-    // Create track material with a dirt-like appearance
+    // Create track material with a dirt-like appearance and improved depth handling
     const trackMaterial = new THREE.MeshStandardMaterial({
       color: dirtTexture.color,
       roughness: dirtTexture.roughness,
       metalness: dirtTexture.metalness,
-      side: THREE.DoubleSide
+      side: THREE.DoubleSide,
+      depthWrite: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1
     });
 
     // Create track mesh
