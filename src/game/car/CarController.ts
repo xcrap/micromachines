@@ -33,7 +33,8 @@ export class CarController {
     this.carPhysics = new CarPhysics();
 
     // Set initial position and direction
-    this.position = new THREE.Vector3(0, 0.5, 0);
+    // Position the car slightly behind the start line
+    this.position = new THREE.Vector3(0, 0.5, 2);
     this.direction = new THREE.Vector3(0, 0, 1);
     this.groundNormal = new THREE.Vector3(0, 1, 0);
 

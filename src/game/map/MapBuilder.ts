@@ -16,15 +16,19 @@ export class MapBuilder {
   }
 
   private initializeTrackPath(): void {
-    // Create a larger, more complex track with smoother curves
+    // Create a larger track with smoother curves and a better start/finish line approach
     this.trackPath.moveTo(0, 0);
 
-    // Create a larger track with more natural curves and features
-    this.trackPath.bezierCurveTo(30, 0, 40, -20, 40, -40);
+    // Adjust the first curve to create a straighter approach to start/finish line
+    this.trackPath.bezierCurveTo(
+      20, 0,  // First control point - straighter approach
+      40, -10, // Second control point
+      40, -40  // End point
+    );
     this.trackPath.bezierCurveTo(40, -60, 20, -70, 0, -60);
     this.trackPath.bezierCurveTo(-20, -50, -40, -20, -40, 0);
     this.trackPath.bezierCurveTo(-40, 20, -20, 40, 0, 40);
-    this.trackPath.bezierCurveTo(20, 40, 30, 20, 0, 0);
+    this.trackPath.bezierCurveTo(20, 40, 20, 20, 0, 0); // Smoother approach to finish
   }
 
   public buildMap(): void {
@@ -394,29 +398,65 @@ export class MapBuilder {
     finishLine.add(rightPillar);
     finishLine.add(banner);
 
-    // Position at the start of the track
-    finishLine.position.set(0, 0, -this.trackWidth / 2);
+    // Position at the exact start of the track (0,0) with proper orientation
+    const trackStartPoint = this.trackPoints[0];
+    finishLine.position.set(
+      trackStartPoint.x,
+      0,
+      trackStartPoint.y // Using y component for z-coordinate in 3D space
+    );
+
+    // Calculate the direction to the next track point for proper orientation
+    const nextPoint = this.trackPoints[1];
+    const direction = new THREE.Vector2()
+      .subVectors(nextPoint, trackStartPoint)
+      .normalize();
+
+    // Calculate rotation angle from direction vector
+    const angle = Math.atan2(direction.y, direction.x);
+    finishLine.rotation.y = angle;
+
     finishLine.castShadow = true;
     finishLine.receiveShadow = true;
 
     this.scene.add(finishLine);
-    this.terrainObjects.push(finishLine);
+    // Don't add finish line to terrain objects to prevent collision detection
   }
   // Method to check if a point is on the track
   public isPointOnTrack(x: number, z: number): boolean {
     // Use stored track points for efficient checking
     let minDistance = Infinity;
+    let closestPointIndex = 0;
 
-    for (const point of this.trackPoints) {
+    // Find the closest track point
+    for (let i = 0; i < this.trackPoints.length; i++) {
+      const point = this.trackPoints[i];
       const distance = Math.sqrt(Math.pow(point.x - x, 2) + Math.pow(point.y - z, 2));
       if (distance < minDistance) {
         minDistance = distance;
+        closestPointIndex = i;
       }
     }
 
+    // Get the current point and next point to calculate track segment direction
+    const currentPoint = this.trackPoints[closestPointIndex];
+    const nextPoint = this.trackPoints[(closestPointIndex + 1) % this.trackPoints.length];
+
+    // Calculate track segment direction
+    const segmentDirection = new THREE.Vector2()
+      .subVectors(nextPoint, currentPoint)
+      .normalize();
+
+    // Calculate perpendicular vector to track direction
+    const perpendicular = new THREE.Vector2(-segmentDirection.y, segmentDirection.x);
+
+    // Calculate point's position relative to track segment
+    const pointVector = new THREE.Vector2(x - currentPoint.x, z - currentPoint.y);
+    const distanceFromSegment = Math.abs(pointVector.dot(perpendicular));
+
     // Add a buffer to prevent objects from being too close to the track
-    const bufferWidth = this.trackWidth * 1.2;
-    return minDistance <= bufferWidth;
+    const bufferWidth = this.trackWidth * 0.6; // Reduced from 1.2 to 0.6 for more precise detection
+    return distanceFromSegment <= bufferWidth;
   }
 
   // Get all terrain objects for raycasting
