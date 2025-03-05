@@ -117,4 +117,26 @@ export class MapBuilder {
     public getTerrainObjects(): THREE.Object3D[] {
         return this.terrainObjects;
     }
+
+    public getStartPosition(): THREE.Vector3 {
+        // Use the first track point
+        if (this.trackPoints.length > 0) {
+            const startPoint = this.trackPoints[0];
+            return new THREE.Vector3(startPoint.x, 0, startPoint.y);
+        }
+        return new THREE.Vector3(0, 0, -80); // Fallback to the first control point
+    }
+
+    public getStartDirection(): THREE.Vector3 {
+        // Use direction from first to second point
+        if (this.trackPoints.length > 1) {
+            const firstPoint = this.trackPoints[0];
+            const secondPoint = this.trackPoints[1];
+            const direction = new THREE.Vector2()
+                .subVectors(secondPoint, firstPoint)
+                .normalize();
+            return new THREE.Vector3(direction.x, 0, direction.y);
+        }
+        return new THREE.Vector3(0, 0, 1); // Default forward direction
+    }
 }

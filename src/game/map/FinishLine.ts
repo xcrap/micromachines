@@ -33,16 +33,21 @@ export function createFinishLine(scene: THREE.Scene, trackPoints: THREE.Vector2[
     finishLine.add(rightPillar);
     finishLine.add(banner);
 
-    const trackStartPoint = trackPoints[0];
-    const trackEndPoint = trackPoints[trackPoints.length - 1];
-    const midPoint = new THREE.Vector2(
-        (trackStartPoint.x + trackEndPoint.x) / 2,
-        (trackStartPoint.y + trackEndPoint.y) / 2
-    );
-    finishLine.position.set(midPoint.x, 0, midPoint.y);
+    // Use the start point for the finish line placement
+    const startPoint = trackPoints[0];
+    finishLine.position.set(startPoint.x, 0, startPoint.y);
 
-    const direction = new THREE.Vector2().subVectors(trackEndPoint, trackStartPoint).normalize();
-    const angle = Math.atan2(direction.y, direction.x);
+    // Calculate direction properly from the first and last points
+    const firstPoint = trackPoints[0];
+    const secondPoint = trackPoints[1];
+
+    const direction = new THREE.Vector2()
+        .subVectors(secondPoint, firstPoint)
+        .normalize();
+
+    // Get perpendicular direction for proper orientation across the track
+    const perpDirection = new THREE.Vector2(-direction.y, direction.x);
+    const angle = Math.atan2(perpDirection.y, perpDirection.x);
     finishLine.rotation.y = angle;
 
     finishLine.castShadow = true;

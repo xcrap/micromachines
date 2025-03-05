@@ -44,11 +44,17 @@ export class CarController {
         // Initialize car physics
         this.carPhysics = new CarPhysics();
 
-        // Set initial position and direction
-        // Position the car slightly behind the start line
-        this.position = new THREE.Vector3(0, 0.5, 2);
-        this.direction = new THREE.Vector3(0, 0, 1);
-        this.groundNormal = new THREE.Vector3(0, 1, 0);
+        // Get start position from the map builder
+        const startPosition = mapBuilder.getStartPosition();
+        const startDirection = mapBuilder.getStartDirection();
+
+        // Set initial position and direction using the track's start position
+        this.position = new THREE.Vector3(startPosition.x, 0.5, startPosition.z);
+        this.direction = new THREE.Vector3(startDirection.x, 0, startDirection.z).normalize();
+
+        // Set initial car rotation to face along the track
+        const angle = Math.atan2(startDirection.x, startDirection.z);
+        this.carGroup.rotation.y = angle;
 
         // Initialize raycaster for terrain detection
         this.raycaster = new THREE.Raycaster();

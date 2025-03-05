@@ -94,5 +94,13 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
     scene.add(trackMesh);
     terrainObjects.push(trackMesh);
 
-    return { trackMesh, trackPoints: splinePoints };
+    // Convert 3D points to 2D Vector2 for finish line creation
+    const trackPoints2D = splinePoints.map(point => new THREE.Vector2(point.x, point.z));
+
+    return {
+        trackMesh,
+        trackPoints: trackPoints2D,
+        startPosition: splinePoints[0], // Return the start position for the car
+        startDirection: curve.getTangent(0) // Return the starting direction
+    };
 }
