@@ -77,41 +77,39 @@ export class MapBuilder {
     }
 
     public isPointOnTrack(x: number, z: number): boolean {
+        // Point we're checking
+        const testPoint = new THREE.Vector2(x, z);
+
+        // Find minimum distance to any track segment
         let minDistance = Number.POSITIVE_INFINITY;
-        let closestPointIndex = 0;
 
         for (let i = 0; i < this.trackPoints.length; i++) {
-            const point = this.trackPoints[i];
-            const distance = Math.sqrt(
-                (point.x - x) ** 2 + (point.y - z) ** 2,
+            const current = this.trackPoints[i];
+            const next = this.trackPoints[(i + 1) % this.trackPoints.length];
+
+            // Calculate distance from point to this line segment
+            const lineSegment = new THREE.Line3(
+                new THREE.Vector3(current.x, 0, current.y),
+                new THREE.Vector3(next.x, 0, next.y)
             );
+
+            const closestPoint = new THREE.Vector3();
+            lineSegment.closestPointToPoint(
+                new THREE.Vector3(x, 0, z),
+                true, // clamp to segment
+                closestPoint
+            );
+
+            const distance = new THREE.Vector2(closestPoint.x, closestPoint.z)
+                .distanceTo(testPoint);
+
             if (distance < minDistance) {
                 minDistance = distance;
-                closestPointIndex = i;
             }
         }
 
-        const currentPoint = this.trackPoints[closestPointIndex];
-        const nextPoint =
-            this.trackPoints[(closestPointIndex + 1) % this.trackPoints.length];
-
-        const segmentDirection = new THREE.Vector2()
-            .subVectors(nextPoint, currentPoint)
-            .normalize();
-
-        const perpendicular = new THREE.Vector2(
-            -segmentDirection.y,
-            segmentDirection.x,
-        );
-
-        const pointVector = new THREE.Vector2(
-            x - currentPoint.x,
-            z - currentPoint.y,
-        );
-        const distanceFromSegment = Math.abs(pointVector.dot(perpendicular));
-
-        const bufferWidth = this.trackWidth * 0.6;
-        return distanceFromSegment <= bufferWidth;
+        // Consider point on track if within buffer width
+        return minDistance <= this.trackWidth * 0.6;
     }
 
     public getTerrainObjects(): THREE.Object3D[] {
