@@ -8,11 +8,9 @@ import { createFinishLine } from "./FinishLine";
 
 export class MapBuilder {
     private scene: THREE.Scene;
-    private trackMesh: THREE.Mesh | null = null;
     private trackPath: THREE.Shape;
     private trackWidth = 10; // Increased track width
     private terrainObjects: THREE.Object3D[] = [];
-    private groundMesh: THREE.Mesh | null = null;
     private trackPoints: THREE.Vector2[] = [];
 
     constructor(scene: THREE.Scene) {
@@ -47,12 +45,11 @@ export class MapBuilder {
     }
 
     private createGround(): void {
-        this.groundMesh = createGround(this.scene, this.terrainObjects);
+        createGround(this.scene, this.terrainObjects);
     }
 
     private createTrack(): void {
-        const { trackMesh, trackPoints } = createTrack(this.scene, this.terrainObjects);
-        this.trackMesh = trackMesh;
+        const { trackPoints } = createTrack(this.scene, this.terrainObjects);
         this.trackPoints = trackPoints;
     }
 
@@ -86,7 +83,7 @@ export class MapBuilder {
         for (let i = 0; i < this.trackPoints.length; i++) {
             const point = this.trackPoints[i];
             const distance = Math.sqrt(
-                Math.pow(point.x - x, 2) + Math.pow(point.y - z, 2),
+                (point.x - x) ** 2 + (point.y - z) ** 2,
             );
             if (distance < minDistance) {
                 minDistance = distance;
