@@ -1,73 +1,98 @@
 import * as THREE from 'three';
 
-export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]): { trackMesh: THREE.Mesh, trackPoints: THREE.Vector2[] } {
-    const trackPath = new THREE.Shape();
-    trackPath.moveTo(0, 0);
-    trackPath.bezierCurveTo(20, 0, 40, -10, 40, -40);
-    trackPath.bezierCurveTo(40, -60, 20, -70, 0, -60);
-    trackPath.bezierCurveTo(-20, -50, -40, -20, -40, 0);
-    trackPath.bezierCurveTo(-40, 20, -20, 40, 0, 40);
-    trackPath.bezierCurveTo(20, 40, 20, 20, 0, 0);
+export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]) {
+    // Define control points for a dynamic rally track with smoother transitions.
+    // These points are arranged in a roughly oval layout with varying curvatures.
+    const controlPoints = [
+        new THREE.Vector3(0, 0, -80),
+        new THREE.Vector3(20, 0, -40),
+        new THREE.Vector3(40, 0, -20),
+        new THREE.Vector3(60, 0, 0),
+        new THREE.Vector3(40, 0, 20),
+        new THREE.Vector3(20, 0, 40),
+        new THREE.Vector3(0, 0, 60),
+        new THREE.Vector3(-20, 0, 40),
+        new THREE.Vector3(-40, 0, 20),
+        new THREE.Vector3(-60, 0, 0),
+        new THREE.Vector3(-40, 0, -20),
+        new THREE.Vector3(-20, 0, -40)
+    ];
 
-    const trackPoints = trackPath.getPoints(200);
+    // Create a closed Catmull–Rom curve.
+    // A slightly lower tension (0.3) helps avoid overly sharp joint extensions.
+    const curve = new THREE.CatmullRomCurve3(controlPoints, true);
+    curve.tension = 0.3;
 
-    const trackVertices = [];
-    const trackUVs = [];
-    const trackIndices = [];
+    // Increase divisions for a smoother path sampling.
+    const divisions = 400;
+    const splinePoints = curve.getPoints(divisions);
+
+    // Track geometry parameters.
     const trackWidth = 10;
+    const vertices = [];
+    const uvs = [];
+    const indices = [];
 
-    for (let i = 0; i < trackPoints.length; i++) {
-        const point = trackPoints[i];
-        const nextPoint = trackPoints[(i + 1) % trackPoints.length];
-
-        const dirX = nextPoint.x - point.x;
-        const dirY = nextPoint.y - point.y;
-        const length = Math.sqrt(dirX * dirX + dirY * dirY);
-
-        const normDirX = dirX / length;
-        const normDirY = dirY / length;
-
-        const perpX = -normDirY;
-        const perpY = normDirX;
-
-        const halfWidth = trackWidth / 2;
-
-        trackVertices.push(point.x + perpX * halfWidth, 0.01, point.y + perpY * halfWidth);
-        trackVertices.push(point.x - perpX * halfWidth, 0.01, point.y - perpX * halfWidth);
-
-        trackUVs.push(0, i / trackPoints.length);
-        trackUVs.push(1, i / trackPoints.length);
-
-        if (i < trackPoints.length - 1) {
-            const vertexIndex = i * 2;
-            trackIndices.push(vertexIndex, vertexIndex + 1, vertexIndex + 2);
-            trackIndices.push(vertexIndex + 1, vertexIndex + 3, vertexIndex + 2);
-        }
+    // Compute normals by deriving the tangent and taking its perpendicular on the XZ plane.
+    const normals = [];
+    for (let i = 0; i < splinePoints.length; i++) {
+        const t = i / splinePoints.length;
+        const tangent3D = curve.getTangent(t);
+        const tangent2D = new THREE.Vector2(tangent3D.x, tangent3D.z).normalize();
+        const normal2D = new THREE.Vector2(-tangent2D.y, tangent2D.x);
+        normals.push(normal2D);
     }
 
-    const trackGeometry = new THREE.BufferGeometry();
-    trackGeometry.setAttribute('position', new THREE.Float32BufferAttribute(trackVertices, 3));
-    trackGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(trackUVs, 2));
-    trackGeometry.setIndex(trackIndices);
-    trackGeometry.computeVertexNormals();
+    // Build the strip geometry along the curve.
+    for (let i = 0; i < splinePoints.length; i++) {
+        const point3D = splinePoints[i];
+        const n2D = normals[i];
+        const halfW = trackWidth / 2;
 
-    const trackMaterial = new THREE.MeshStandardMaterial({
+        // Outer edge vertex (offset by the normal)
+        vertices.push(
+            point3D.x + n2D.x * halfW,
+            point3D.y + 0.01, // slight elevation to avoid z-fighting
+            point3D.z + n2D.y * halfW
+        );
+        // Inner edge vertex (offset in the opposite direction)
+        vertices.push(
+            point3D.x - n2D.x * halfW,
+            point3D.y + 0.01,
+            point3D.z - n2D.y * halfW
+        );
+
+        // UV mapping along the track.
+        uvs.push(0, i / splinePoints.length);
+        uvs.push(1, i / splinePoints.length);
+
+        // Construct triangles for the quad between segments.
+        const idx = i * 2;
+        const nextIdx = ((i + 1) % splinePoints.length) * 2;
+        indices.push(idx, idx + 1, nextIdx);
+        indices.push(idx + 1, nextIdx + 1, nextIdx);
+    }
+
+    // Create BufferGeometry.
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+
+    // Material for the track.
+    const material = new THREE.MeshStandardMaterial({
         color: 0x8b4513,
         roughness: 1.0,
         metalness: 0.0,
         side: THREE.DoubleSide,
-        depthWrite: true,
-        polygonOffset: true,
-        polygonOffsetFactor: -1,
-        polygonOffsetUnits: -1,
     });
 
-    const trackMesh = new THREE.Mesh(trackGeometry, trackMaterial);
+    // Create the mesh, add it to the scene, and store in terrainObjects.
+    const trackMesh = new THREE.Mesh(geometry, material);
     trackMesh.receiveShadow = true;
-    trackMesh.castShadow = false;
     scene.add(trackMesh);
-
     terrainObjects.push(trackMesh);
 
-    return { trackMesh, trackPoints };
+    return { trackMesh, trackPoints: splinePoints };
 }
