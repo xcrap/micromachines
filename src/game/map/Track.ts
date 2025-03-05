@@ -33,7 +33,7 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
         const halfWidth = trackWidth / 2;
 
         trackVertices.push(point.x + perpX * halfWidth, 0.01, point.y + perpY * halfWidth);
-        trackVertices.push(point.x - perpX * halfWidth, 0.01, point.y - perpY * halfWidth);
+        trackVertices.push(point.x - perpX * halfWidth, 0.01, point.y - perpX * halfWidth);
 
         trackUVs.push(0, i / trackPoints.length);
         trackUVs.push(1, i / trackPoints.length);

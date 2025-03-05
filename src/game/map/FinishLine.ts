@@ -34,11 +34,14 @@ export function createFinishLine(scene: THREE.Scene, trackPoints: THREE.Vector2[
     finishLine.add(banner);
 
     const trackStartPoint = trackPoints[0];
-    finishLine.position.set(trackStartPoint.x, 0, trackStartPoint.y);
+    const trackEndPoint = trackPoints[trackPoints.length - 1];
+    const midPoint = new THREE.Vector2(
+        (trackStartPoint.x + trackEndPoint.x) / 2,
+        (trackStartPoint.y + trackEndPoint.y) / 2
+    );
+    finishLine.position.set(midPoint.x, 0, midPoint.y);
 
-    const nextPoint = trackPoints[1];
-    const direction = new THREE.Vector2().subVectors(nextPoint, trackStartPoint).normalize();
-
+    const direction = new THREE.Vector2().subVectors(trackEndPoint, trackStartPoint).normalize();
     const angle = Math.atan2(direction.y, direction.x);
     finishLine.rotation.y = angle;
 
