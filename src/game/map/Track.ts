@@ -70,6 +70,8 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
         vertices.push(innerX, innerHeight, innerZ);
 
         // UV mapping along the track.
+        // We'll make the vertical coordinate (v) run along the track
+        // and the horizontal coordinate (u) go from left edge (0) to right edge (1)
         uvs.push(0, i / splinePoints.length);
         uvs.push(1, i / splinePoints.length);
 
@@ -87,16 +89,143 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
     geometry.setIndex(indices);
     geometry.computeVertexNormals();
 
-    // Material for the track.
-    const material = new THREE.MeshStandardMaterial({
-        color: 0x8b4513,
-        roughness: 1.0,
-        metalness: 0.0,
+    // Custom shader material for the track without mouse interaction
+    const trackShaderMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+            u_time: { value: 0.0 },
+            u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
+        },
+        vertexShader: `
+            varying vec2 v_uv;
+
+            void main() {
+                v_uv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `,
+        fragmentShader: `
+            precision mediump float;
+
+            uniform float u_time;
+            uniform vec2 u_resolution;
+            varying vec2 v_uv;
+
+            // Hash function for random values
+            float hash(float n) {
+                return fract(sin(n) * 43758.5453);
+            }
+
+            // 2D noise function
+            float noise(vec2 p) {
+                vec2 i = floor(p);
+                vec2 f = fract(p);
+                f = f * f * (3.0 - 2.0 * f);
+                float n = i.x + i.y * 57.0;
+                return mix(
+                    mix(hash(n), hash(n + 1.0), f.x),
+                    mix(hash(n + 57.0), hash(n + 58.0), f.x),
+                    f.y
+                );
+            }
+
+            // Fractional Brownian Motion
+            float fbm(vec2 p) {
+                float value = 0.0;
+                float amplitude = 0.5;
+                float frequency = 2.0;
+                for (int i = 0; i < 5; i++) {
+                    value += amplitude * noise(p * frequency);
+                    amplitude *= 0.5;
+                    frequency *= 2.0;
+                }
+                return value;
+            }
+
+            // Tire track pattern
+            float tireTrack(vec2 uv, float offset) {
+                float track = 0.0;
+
+                // Track width and grooves
+                float trackWidth = 0.3;
+                float grooveWidth = 0.03;
+                float grooveDepth = 0.7;
+
+                // Calculate distance from track center
+                float dist = abs(uv.x - offset);
+
+                // Main track
+                if (dist < trackWidth) {
+                    track = 1.0;
+
+                    // Add tire grooves
+                    float groovePattern = sin(uv.y * 30.0) * 0.5 + 0.5;
+                    if (mod(uv.y * 10.0 + sin(uv.x * 5.0) * 0.5, 1.0) < 0.5 * groovePattern) {
+                        track *= grooveDepth;
+                    }
+                }
+
+                return track;
+            }
+
+            void main() {
+                // Correct aspect ratio
+                vec2 uv = v_uv;
+                float aspect = u_resolution.x / u_resolution.y;
+
+                // Dirt road base color
+                vec3 dirtColor1 = vec3(0.45, 0.29, 0.18); // Dark brown
+                vec3 dirtColor2 = vec3(0.60, 0.40, 0.25); // Medium brown
+                vec3 dirtColor3 = vec3(0.76, 0.56, 0.38); // Light brown
+
+                // Create base dirt texture with noise
+                float dirtNoise = fbm(uv * 5.0 + u_time * 0.05);
+                float dirtDetail = fbm(uv * 20.0 - u_time * 0.02);
+
+                // Combine noise layers for dirt texture
+                float dirtPattern = dirtNoise * 0.7 + dirtDetail * 0.3;
+
+                // Mix dirt colors based on noise
+                vec3 baseColor = mix(dirtColor1, dirtColor2, dirtPattern);
+                baseColor = mix(baseColor, dirtColor3, dirtDetail * dirtDetail * 0.5);
+
+                // Add small stones/pebbles
+                float pebbles = smoothstep(0.75, 0.8, noise(uv * 40.0));
+                baseColor = mix(baseColor, vec3(0.65, 0.6, 0.55), pebbles * 0.3);
+
+                // Add tire tracks
+                float leftTrack = tireTrack(uv, 0.3);
+                float rightTrack = tireTrack(uv, 0.7);
+
+                // Combine tracks and make them darker
+                float tracks = max(leftTrack, rightTrack);
+                vec3 trackColor = dirtColor1 * 0.7;
+
+                // Apply tracks to base color
+                vec3 finalColor = mix(baseColor, trackColor, tracks * 0.6);
+
+                // Add some puddles/mud
+                float puddles = smoothstep(0.6, 0.7, fbm(uv * 3.0 + u_time * 0.1));
+                finalColor = mix(finalColor, vec3(0.25, 0.2, 0.15), puddles * 0.5);
+
+                // Add some variation based on time
+                finalColor *= 0.9 + 0.1 * sin(u_time * 0.2);
+
+                // Output final color
+                gl_FragColor = vec4(finalColor, 1.0);
+
+                #ifdef PHYSICAL
+                  #include <colorspace_fragment>
+                #endif
+            }
+        `,
         side: THREE.DoubleSide,
     });
 
+    trackShaderMaterial.needsUpdate = true;
+    trackShaderMaterial.uniforms.u_resolution.value.set(window.innerWidth, window.innerHeight);
+
     // Create the mesh and add it to the scene.
-    const trackMesh = new THREE.Mesh(geometry, material);
+    const trackMesh = new THREE.Mesh(geometry, trackShaderMaterial);
     trackMesh.receiveShadow = true;
     scene.add(trackMesh);
     terrainObjects.push(trackMesh);
@@ -109,6 +238,14 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
 
     // Convert 3D points to 2D Vector2 for finish line creation
     const trackPoints2D = splinePoints.map(point => new THREE.Vector2(point.x, point.z));
+
+    // Handle window resize to update shader uniforms
+    window.addEventListener('resize', () => {
+        (trackMesh.material as THREE.ShaderMaterial).uniforms.u_resolution.value.set(
+            window.innerWidth,
+            window.innerHeight
+        );
+    });
 
     return {
         trackMesh,
