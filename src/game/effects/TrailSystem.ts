@@ -12,28 +12,48 @@ export class TrailSystem {
     private trailMaterial: THREE.MeshBasicMaterial;
     private trailGeometry: THREE.PlaneGeometry;
     private readonly TRAIL_LIFETIME: number = 3; // 3 seconds lifetime
+    private trailColor: THREE.Color;
+    private validObjectsCache: Map<string, boolean> = new Map();
+    private invalidObjectsCache: Map<string, boolean> = new Map();
+    raycaster: THREE.Raycaster;    
 
-    constructor(scene: THREE.Scene) {
+    constructor(scene: THREE.Scene, color = 0x333333) {
         this.scene = scene;
-
+        this.trailColor = new THREE.Color(color);
+        this.raycaster = new THREE.Raycaster();
         // Create material with transparency for fading
         this.trailMaterial = new THREE.MeshBasicMaterial({
-            color: 0x333333,
+            color: this.trailColor,
             transparent: true,
             opacity: 0.7,
-            side: THREE.DoubleSide
+            side: THREE.DoubleSide,
+            depthWrite: false, // Prevent z-fighting
+            blending: THREE.AdditiveBlending, // Better visibility
+            // Ensure trails are rendered below other objects
+            depthTest: true
         });
 
         // Small plane for each trail particle
         this.trailGeometry = new THREE.PlaneGeometry(0.15, 0.08);
+
     }
 
-    public addTrail(position: THREE.Vector3, rotation: number): void {
+    public addTrail(position: THREE.Vector3, rotation: number, color?: THREE.Color): void {
+        // Skip ground type checking for now as we'll handle positioning differently
+        
         // Create a new trail particle
-        const mesh = new THREE.Mesh(this.trailGeometry, this.trailMaterial.clone());
+        const material = this.trailMaterial.clone();
+        if (color) {
+            material.color = color;
+        }
+        const mesh = new THREE.Mesh(this.trailGeometry, material);
 
-        // Position the trail on the ground with a small offset to prevent z-fighting
-        mesh.position.set(position.x, 0.01, position.z);
+        // Set a very low renderOrder to ensure it renders below everything
+        mesh.renderOrder = -100;
+        
+        // Position the trail with an offset that's very close to the ground
+        // The key is to position it just slightly above the terrain but below any objects
+        mesh.position.set(position.x, position.y + 0.01, position.z);
 
         // Rotate to lay flat on the ground
         mesh.rotation.x = -Math.PI / 2;
@@ -91,5 +111,18 @@ export class TrailSystem {
         this.trailGeometry.dispose();
         this.trailMaterial.dispose();
         this.trailParticles = [];
+
+        // Clear caches
+        this.validObjectsCache.clear();
+        this.invalidObjectsCache.clear();
+    }
+
+    public setTrailColor(color: THREE.Color | number): void {
+        if (color instanceof THREE.Color) {
+            this.trailColor = color;
+        } else {
+            this.trailColor = new THREE.Color(color);
+        }
+        this.trailMaterial.color = this.trailColor;
     }
 }

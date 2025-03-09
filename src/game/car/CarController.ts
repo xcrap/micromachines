@@ -340,10 +340,16 @@ export class CarController {
     private createDriftTrails(): void {
         // Calculate wheel positions in world space
         const wheelPositions = [
-            { x: 0.45, y: 0.2, z: -0.6 }, // Rear left
-            { x: -0.45, y: 0.2, z: -0.6 }, // Rear right
+            { x: 0.45, y: 0.05, z: -0.6 }, // Rear right
+            { x: -0.45, y: 0.05, z: -0.6 }, // Rear left
         ];
 
+        // Get just the main ground/track mesh from the map builder
+        // This is more reliable than filtering by name
+        const groundMesh = this.mapBuilder.getGroundMesh();
+        
+        if (!groundMesh) return;
+        
         // Only create trails for rear wheels (where drift marks would appear)
         for (const wheelPos of wheelPositions) {
             // Convert local wheel position to world position
@@ -351,8 +357,26 @@ export class CarController {
                 new THREE.Vector3(wheelPos.x, wheelPos.y, wheelPos.z),
             );
 
-            // Add trail at wheel position with car's rotation
-            this.trailSystem.addTrail(worldPos, this.carGroup.rotation.y);
+            // Cast ray downward from slightly above the wheel position
+            this.raycaster.set(
+                new THREE.Vector3(worldPos.x, worldPos.y + 2, worldPos.z),
+                new THREE.Vector3(0, -1, 0)
+            );
+
+            // Only check intersection with the ground mesh specifically
+            const intersects = this.raycaster.intersectObject(groundMesh, true);
+
+            if (intersects.length > 0) {
+                // Use the exact intersection point on the ground
+                const groundPoint = intersects[0].point.clone();
+                
+                // Trails should be rendered right at ground level
+                // Add a tiny offset to prevent z-fighting with the ground
+                groundPoint.y += 0.005;
+                
+                // Add trail at the exact ground point with car's rotation
+                this.trailSystem.addTrail(groundPoint, this.carGroup.rotation.y);
+            }
         }
     }
 
