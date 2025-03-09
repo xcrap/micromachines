@@ -1,9 +1,14 @@
 import * as THREE from 'three';
 
-export function createFinishLine(scene: THREE.Scene, trackPoints: THREE.Vector2[]): THREE.Group {
+export function createFinishLine(scene: THREE.Scene, trackPoints: THREE.Vector2[], groundMesh: THREE.Mesh): THREE.Group {
     const markerHeight = 5;
     const markerWidth = 12;
     const markerDepth = 0.3;
+
+    // Get the height function
+    const getHeightAt = (groundMesh as THREE.Mesh & {
+        getHeightAt: (x: number, z: number) => number
+    }).getHeightAt;
 
     const pillarGeometry = new THREE.BoxGeometry(markerDepth, markerHeight, markerDepth);
     const pillarMaterial = new THREE.MeshStandardMaterial({
@@ -35,20 +40,25 @@ export function createFinishLine(scene: THREE.Scene, trackPoints: THREE.Vector2[
 
     // Use the start point for the finish line placement
     const startPoint = trackPoints[0];
-    finishLine.position.set(startPoint.x, 0, startPoint.y);
+    // Get the height at this position
+    const y = getHeightAt(startPoint.x, startPoint.y);
+
+    finishLine.position.set(startPoint.x, y, startPoint.y);
 
     // Calculate direction properly from the first and last points
-    const firstPoint = trackPoints[0];
-    const secondPoint = trackPoints[1];
+    if (trackPoints.length > 1) {
+        const firstPoint = trackPoints[0];
+        const secondPoint = trackPoints[1];
 
-    const direction = new THREE.Vector2()
-        .subVectors(secondPoint, firstPoint)
-        .normalize();
+        const direction = new THREE.Vector2()
+            .subVectors(secondPoint, firstPoint)
+            .normalize();
 
-    // Get perpendicular direction for proper orientation across the track
-    const perpDirection = new THREE.Vector2(-direction.y, direction.x);
-    const angle = Math.atan2(perpDirection.y, perpDirection.x);
-    finishLine.rotation.y = angle;
+        // Get perpendicular direction for proper orientation across the track
+        const perpDirection = new THREE.Vector2(-direction.y, direction.x);
+        const angle = Math.atan2(perpDirection.y, perpDirection.x);
+        finishLine.rotation.y = angle;
+    }
 
     finishLine.castShadow = true;
     finishLine.receiveShadow = true;

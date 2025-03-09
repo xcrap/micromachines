@@ -12,6 +12,7 @@ export class MapBuilder {
     private trackWidth = 10; // Increased track width
     private terrainObjects: THREE.Object3D[] = [];
     private trackPoints: THREE.Vector2[] = [];
+    private groundMesh: THREE.Mesh | null = null;
 
     constructor(scene: THREE.Scene) {
         this.scene = scene;
@@ -45,16 +46,18 @@ export class MapBuilder {
     }
 
     private createGround(): void {
-        createGround(this.scene, this.terrainObjects);
+        this.groundMesh = createGround(this.scene, this.terrainObjects);
     }
 
     private createTrack(): void {
-        const { trackPoints } = createTrack(this.scene, this.terrainObjects);
+        if (!this.groundMesh) return;
+        const { trackPoints } = createTrack(this.scene, this.terrainObjects, this.groundMesh);
         this.trackPoints = trackPoints;
     }
 
     private createHills(): void {
-        createHills(this.scene, this.terrainObjects, this.isPointOnTrack.bind(this));
+        if (!this.groundMesh) return;
+        createHills(this.scene, this.terrainObjects, this.isPointOnTrack.bind(this), this.groundMesh);
     }
 
     private addDecorations(): void {
@@ -65,15 +68,18 @@ export class MapBuilder {
     }
 
     private addTrees(): void {
-        createTrees(this.scene, this.terrainObjects, this.isPointOnTrack.bind(this));
+        if (!this.groundMesh) return;
+        createTrees(this.scene, this.terrainObjects, this.isPointOnTrack.bind(this), this.groundMesh);
     }
 
     private addRocks(): void {
-        createRocks(this.scene, this.terrainObjects, this.isPointOnTrack.bind(this));
+        if (!this.groundMesh) return;
+        createRocks(this.scene, this.terrainObjects, this.isPointOnTrack.bind(this), this.groundMesh);
     }
 
     private addFinishLine(): void {
-        createFinishLine(this.scene, this.trackPoints);
+        if (!this.groundMesh || this.trackPoints.length === 0) return;
+        createFinishLine(this.scene, this.trackPoints, this.groundMesh);
     }
 
     public isPointOnTrack(x: number, z: number): boolean {
@@ -118,9 +124,10 @@ export class MapBuilder {
 
     public getStartPosition(): THREE.Vector3 {
         // Use the first track point
-        if (this.trackPoints.length > 0) {
+        if (this.trackPoints.length > 0 && this.groundMesh) {
             const startPoint = this.trackPoints[0];
-            return new THREE.Vector3(startPoint.x, 0, startPoint.y);
+            const height = (this.groundMesh as any).getHeightAt(startPoint.x, startPoint.y) + 0.5;
+            return new THREE.Vector3(startPoint.x, height, startPoint.y);
         }
         return new THREE.Vector3(0, 0, -80); // Fallback to the first control point
     }
@@ -136,5 +143,17 @@ export class MapBuilder {
             return new THREE.Vector3(direction.x, 0, direction.y);
         }
         return new THREE.Vector3(0, 0, 1); // Default forward direction
+    }
+
+    public getGroundMesh(): THREE.Mesh | null {
+        return this.groundMesh;
+    }
+
+    // This method helps adjust the terrain height at specific points, useful for debugging
+    public getHeightAt(x: number, z: number): number {
+        if (this.groundMesh) {
+            return (this.groundMesh as any).getHeightAt(x, z);
+        }
+        return 0;
     }
 }

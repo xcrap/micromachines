@@ -157,6 +157,7 @@ export class GameEngine {
         requestAnimationFrame(this.animate.bind(this));
 
         const deltaTime = this.clock.getDelta();
+        const elapsedTime = this.clock.getElapsedTime();
 
         // Update car physics and controls
         this.carController.update(deltaTime);
@@ -170,6 +171,7 @@ export class GameEngine {
             this.controls.target.lerp(carPosition, 0.05);
             this.controls.update();
         }
+
 
         // Render scene
         this.renderer.render(this.scene, this.camera);

@@ -1,11 +1,16 @@
 import * as THREE from 'three';
 
-export function createTrees(scene: THREE.Scene, terrainObjects: THREE.Object3D[], isPointOnTrack: (x: number, z: number) => boolean): THREE.Group[] {
+export function createTrees(scene: THREE.Scene, terrainObjects: THREE.Object3D[], isPointOnTrack: (x: number, z: number) => boolean, groundMesh: THREE.Mesh): THREE.Group[] {
     const trees: THREE.Group[] = [];
     const treeCount = 50;
     let treesCreated = 0;
     let attempts = 0;
     const maxAttempts = 200;
+
+    // Get the height function
+    const getHeightAt = (groundMesh as THREE.Mesh & {
+        getHeightAt: (x: number, z: number) => number
+    }).getHeightAt;
 
     while (treesCreated < treeCount && attempts < maxAttempts) {
         const trunkGeometry = new THREE.CylinderGeometry(0.3, 0.5, 2, 8);
@@ -35,7 +40,10 @@ export function createTrees(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
         const z = Math.sin(angle) * distance;
 
         if (!isPointOnTrack(x, z)) {
-            tree.position.set(x, 0, z);
+            // Get the height at this position
+            const y = getHeightAt(x, z);
+
+            tree.position.set(x, y, z);
             tree.scale.set(
                 0.8 + Math.random() * 0.4,
                 0.8 + Math.random() * 0.4,

@@ -1,11 +1,16 @@
 import * as THREE from 'three';
 
-export function createRocks(scene: THREE.Scene, terrainObjects: THREE.Object3D[], isPointOnTrack: (x: number, z: number) => boolean): THREE.Mesh[] {
+export function createRocks(scene: THREE.Scene, terrainObjects: THREE.Object3D[], isPointOnTrack: (x: number, z: number) => boolean, groundMesh: THREE.Mesh): THREE.Mesh[] {
     const rocks: THREE.Mesh[] = [];
     const rockCount = 30;
     let rocksCreated = 0;
     let attempts = 0;
     const maxAttempts = 150;
+
+    // Get the height function
+    const getHeightAt = (groundMesh as THREE.Mesh & {
+        getHeightAt: (x: number, z: number) => number
+    }).getHeightAt;
 
     while (rocksCreated < rockCount && attempts < maxAttempts) {
         const rockGeometry = new THREE.DodecahedronGeometry(1 + Math.random());
@@ -23,7 +28,10 @@ export function createRocks(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
         const z = Math.sin(angle) * distance;
 
         if (!isPointOnTrack(x, z)) {
-            rock.position.set(x, 0, z);
+            // Get the height at this position
+            const y = getHeightAt(x, z);
+
+            rock.position.set(x, y, z);
             rock.scale.set(
                 0.5 + Math.random() * 1.5,
                 0.5 + Math.random() * 1.5,
