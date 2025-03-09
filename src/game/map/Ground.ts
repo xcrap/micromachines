@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { ShaderMaterial, TextureLoader } from 'three';
 
 export function createGround(scene: THREE.Scene, terrainObjects: THREE.Object3D[]): THREE.Mesh {
     const groundSize = 200;
@@ -24,10 +25,35 @@ export function createGround(scene: THREE.Scene, terrainObjects: THREE.Object3D[
 
     groundGeometry.computeVertexNormals();
 
-    const groundMaterial = new THREE.MeshStandardMaterial({
-        color: 0x22c55e,
-        roughness: 0.9,
-        metalness: 0.1,
+    const vertexShader = `
+        varying vec3 vNormal;
+        varying vec3 vPosition;
+
+        void main() {
+            vNormal = normalize(normalMatrix * normal);
+            vPosition = (modelViewMatrix * vec4(position, 1.0)).xyz;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+    `;
+
+    const fragmentShader = `
+        uniform vec3 uColor;
+        varying vec3 vNormal;
+        varying vec3 vPosition;
+
+        void main() {
+            float intensity = dot(vNormal, vec3(0.0, 1.0, 0.0));
+            vec3 color = uColor * intensity;
+            gl_FragColor = vec4(color, 1.0);
+        }
+    `;
+
+    const groundMaterial = new ShaderMaterial({
+        uniforms: {
+            uColor: { value: new THREE.Color(0x22c55e) }
+        },
+        vertexShader,
+        fragmentShader
     });
 
     const groundMesh = new THREE.Mesh(groundGeometry, groundMaterial);
