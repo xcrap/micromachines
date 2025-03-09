@@ -9,7 +9,7 @@ export class InputManager {
 
   private onKeyDown(event: KeyboardEvent): void {
     // Prevent default behavior for game control keys to avoid page scrolling
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'w', 'a', 's', 'd'].includes(event.key.toLowerCase())) {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'q', 'a', 'o', 'p'].includes(event.key.toLowerCase())) {
       event.preventDefault();
     }
     

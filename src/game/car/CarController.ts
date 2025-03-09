@@ -107,16 +107,16 @@ export class CarController {
         // Get input values using WASD and arrow keys
         const input = {
             forward:
-                this.inputManager.isKeyPressed("w") ||
+                this.inputManager.isKeyPressed("q") ||
                 this.inputManager.isKeyPressed("ArrowUp"),
             backward:
-                this.inputManager.isKeyPressed("s") ||
+                this.inputManager.isKeyPressed("a") ||
                 this.inputManager.isKeyPressed("ArrowDown"),
             left:
-                this.inputManager.isKeyPressed("a") ||
+                this.inputManager.isKeyPressed("o") ||
                 this.inputManager.isKeyPressed("ArrowLeft"),
             right:
-                this.inputManager.isKeyPressed("d") ||
+                this.inputManager.isKeyPressed("p") ||
                 this.inputManager.isKeyPressed("ArrowRight"),
             brake: this.inputManager.isKeyPressed(" "), // Space bar
         };
