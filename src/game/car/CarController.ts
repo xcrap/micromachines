@@ -22,6 +22,8 @@ export class CarController {
     private isDrifting = false;
     private lastTrailTime = 0;
     private readonly TRAIL_SPAWN_INTERVAL: number = 0.05;
+    private driftTrailColor = new THREE.Color(0x333333);
+    private driftIntensity = 0;
 
     // Physics-based terrain following
     private readonly wheelPositions = [
@@ -118,7 +120,8 @@ export class CarController {
             right:
                 this.inputManager.isKeyPressed("p") ||
                 this.inputManager.isKeyPressed("ArrowRight"),
-            brake: this.inputManager.isKeyPressed(" "), // Space bar
+            brake: false, // Changed: brake is no longer spacebar
+            drift: this.inputManager.isKeyPressed(" "), // Spacebar is now for drifting
         };
 
         // Check if car is on track
@@ -136,15 +139,32 @@ export class CarController {
         // Apply physics to car position and rotation
         const velocity = this.carPhysics.getVelocity();
         const carSteeringAngle = this.carPhysics.getSteeringAngle();
+        const lateralVelocity = this.carPhysics.getLateralVelocity();
 
         // Update direction vector based on steering
         this.direction.x = Math.sin(this.carGroup.rotation.y);
         this.direction.z = Math.cos(this.carGroup.rotation.y);
 
-        // Calculate new position
+        // Create a lateral direction vector (perpendicular to main direction)
+        const lateralDirection = new THREE.Vector3(
+            -this.direction.z,  // perpendicular to forward direction
+            0,
+            this.direction.x
+        );
+
+        // Calculate new position with both forward velocity and lateral slide
         const newPosition = this.position.clone();
+
+        // Apply forward velocity
         newPosition.x += this.direction.x * velocity * dt;
         newPosition.z += this.direction.z * velocity * dt;
+
+        // Apply lateral velocity for drift sliding effect - amplified for more obvious slide
+        const amplifiedLateralVelocity = lateralVelocity * (velocity > 10 ? 1.2 : 1.0); // Amplify slide at higher speeds
+        if (Math.abs(amplifiedLateralVelocity) > 0.1) {
+            newPosition.x += lateralDirection.x * amplifiedLateralVelocity * dt;
+            newPosition.z += lateralDirection.z * amplifiedLateralVelocity * dt;
+        }
 
         // Check for collision with map boundaries
         if (this.isPositionValid(newPosition)) {
@@ -154,8 +174,33 @@ export class CarController {
             this.carPhysics.reverseVelocity(0.5);
         }
 
-        // Update rotation based on steering
-        this.carGroup.rotation.y += carSteeringAngle * velocity * dt;
+        // Update rotation based on steering and apply a drift effect
+        const isDrifting = this.carPhysics.isDrifting();
+        const driftFactor = this.carPhysics.getDriftFactor();
+
+        // With strong lateral sliding, reduce the steering effect on rotation
+        // This makes the car appear to slide more and turn less during drift
+        const lateralSlideFactor = Math.min(1.0, Math.max(0, 1.0 - Math.abs(lateralVelocity) * 0.08));
+        const steeringEffectiveness = isDrifting ? lateralSlideFactor : 1.0;
+
+        // Apply rotation based on steering and velocity
+        this.carGroup.rotation.y += carSteeringAngle * velocity * dt * steeringEffectiveness;
+
+        // Apply visual tilt effects for drifting and lateral movement
+        if (isDrifting && Math.abs(velocity) > 5) {
+            // Tilt the car based on lateral velocity for more realistic leaning into drift
+            const lateralTilt = -Math.sign(lateralVelocity) * Math.min(Math.abs(lateralVelocity * 0.06), 0.25);
+
+            // Tilt front end slightly down during drift for dynamic effect
+            this.carGroup.rotation.x = 0.025 * driftFactor;
+
+            // Apply z-axis tilt based on lateral movement (lean effect)
+            this.carGroup.rotation.z = lateralTilt;
+        } else {
+            // Smoothly reset tilts
+            this.carGroup.rotation.z *= 0.9;
+            this.carGroup.rotation.x *= 0.9;
+        }
 
         // Update car wheels rotation based on velocity
         this.carModel.updateWheelRotation(velocity * dt);
@@ -169,14 +214,25 @@ export class CarController {
         // Handle drifting effects
         const speed = Math.abs(velocity);
         const steeringAngle = Math.abs(carSteeringAngle);
-        this.isDrifting = speed > 10 && steeringAngle > 0.1;
 
-        if (this.isDrifting) {
+        // Update drift state
+        this.isDrifting = isDrifting && speed > 8;
+        this.driftIntensity = driftFactor;
+
+        // Create drift trails when drifting or with significant lateral velocity
+        const hasLateralSlide = Math.abs(lateralVelocity) > 1.5;
+        if (this.isDrifting || (hasLateralSlide && speed > 8)) {
             const currentTime = this.clock.getElapsedTime();
             if (currentTime - this.lastTrailTime > this.TRAIL_SPAWN_INTERVAL) {
                 this.createDriftTrails();
                 this.lastTrailTime = currentTime;
             }
+
+            // Make trail intensity depend on both drift factor and lateral velocity
+            const slideIntensity = Math.abs(lateralVelocity) / 4.0;
+            const trailIntensity = Math.max(slideIntensity, this.driftIntensity * 0.15);
+            const colorIntensity = 0.2 + trailIntensity;
+            this.driftTrailColor.setRGB(colorIntensity, colorIntensity, colorIntensity);
         }
 
         // Update trail system
@@ -347,9 +403,9 @@ export class CarController {
         // Get just the main ground/track mesh from the map builder
         // This is more reliable than filtering by name
         const groundMesh = this.mapBuilder.getGroundMesh();
-        
+
         if (!groundMesh) return;
-        
+
         // Only create trails for rear wheels (where drift marks would appear)
         for (const wheelPos of wheelPositions) {
             // Convert local wheel position to world position
@@ -369,13 +425,13 @@ export class CarController {
             if (intersects.length > 0) {
                 // Use the exact intersection point on the ground
                 const groundPoint = intersects[0].point.clone();
-                
+
                 // Trails should be rendered right at ground level
                 // Add a tiny offset to prevent z-fighting with the ground
                 groundPoint.y += 0.005;
-                
+
                 // Add trail at the exact ground point with car's rotation
-                this.trailSystem.addTrail(groundPoint, this.carGroup.rotation.y);
+                this.trailSystem.addTrail(groundPoint, this.carGroup.rotation.y, this.driftTrailColor);
             }
         }
     }

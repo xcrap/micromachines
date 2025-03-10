@@ -39,7 +39,7 @@ function App() {
 					<div className="bg-white/10 backdrop-blur-sm px-3 py-2 rounded-lg">
 						<p className="text-white text-sm">
 							Controls: Q/A or ↑/↓ to drive, O/P or ←/→ to steer, Space to
-							brake, C to toggle free camera
+							drift, C to toggle free camera
 						</p>
 					</div>
 				</div>
