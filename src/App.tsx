@@ -29,28 +29,21 @@ function App() {
 			<div ref={containerRef} className="w-full h-full" />
 
 			{/* UI Overlay */}
-			<div className="absolute top-0 left-0 w-full p-4">
-				<div className="flex justify-between items-center">
-					<div className="flex items-center gap-2 bg-white/10 backdrop-blur-sm px-3 py-2 rounded-lg">
-						<Car className="w-6 h-6 text-yellow-400" />
-						<h1 className="text-white text-xl font-bold">Micro Machines 3D</h1>
-					</div>
-
-					<div className="bg-white/10 backdrop-blur-sm px-3 py-2 rounded-lg">
-						<p className="text-white text-sm">
-							Controls: Q/A or ↑/↓ to drive, O/P or ←/→ to steer, Space to
-							drift, C to toggle free camera
-						</p>
-					</div>
+			<div className="absolute flex flex-col top-2 left-2 w-full max-w-sm p-4 bg-white/40 backdrop-blur-sm rounded-lg">
+				<div className="w-full flex items-center gap-4">
+					<Car className="w-6 h-6 text-yellow-400" />
+					<h1 className="text-white text-xl font-bold">Micro Machines 3D</h1>
 				</div>
-			</div>
-
-			{/* Camera Mode Indicator */}
-			<div className="absolute bottom-4 right-4 bg-white/10 backdrop-blur-sm px-3 py-2 rounded-lg">
-				<p className="text-white text-sm">
-					Press C to toggle camera mode. In free mode, use mouse to rotate and
-					zoom.
-				</p>
+				<div className="flex flex-col gap-2 mt-6">
+					<p className="text-white text-sm">
+						Controls: Q/A or ↑/↓ to drive, O/P or ←/→ to steer, Space to drift,
+						C to toggle free camera
+					</p>
+					<p className="text-white text-sm mt-6">
+						Press C to toggle camera mode. In free mode, use mouse to rotate and
+						zoom.
+					</p>
+				</div>
 			</div>
 		</div>
 	);
