@@ -7,8 +7,8 @@ A fun and exciting car racing game built with vibe coding, no actual coding was 
 MicroMachines is an attempt to revive an old racing game where players can drive cars around various tracks, compete against AI opponents, and challenge their racing skills. The game focuses on fast-paced racing action with simple yet engaging mechanics.
 
 ## TODO Priority
-- () Fix Trailing in top of decoration elements, should render only on top of ground/track and not hills, trees, etc
-- () Make Drift with Spacebar a real drift and not a break, reduce left right steering for more realistic driving.
+- (*) Fix Trailing in top of decoration elements, should render only on top of ground/track and not hills, trees, etc
+- (*) Make Drift with Spacebar a real drift and not a break, reduce left right steering for more realistic driving.
 - () Increase the height to look more a terrain, maybe add some bumps to the track itself?
 - () Add Physics to the car so he can jump and drift. 
 - () Add Sound Effects
