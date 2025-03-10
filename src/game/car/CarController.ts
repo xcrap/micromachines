@@ -83,6 +83,12 @@ export class CarController {
         // Initialize trail system
         this.trailSystem = new TrailSystem(scene);
 
+        // Tell the TrailSystem which object is the track (for color differentiation)
+        const trackMesh = mapBuilder.getTrackMesh();
+        if (trackMesh) {
+            this.trailSystem.setTrackObjects([trackMesh]);
+        }
+
         // Initialize clock
         this.clock = new THREE.Clock();
         this.clock.start();
@@ -394,17 +400,17 @@ export class CarController {
     }
 
     private createDriftTrails(): void {
-        // Calculate wheel positions in world space
+        // Define wheel positions for trails (rear wheels only)
         const wheelPositions = [
-            { x: 0.45, y: 0.05, z: -0.6 }, // Rear right
-            { x: -0.45, y: 0.05, z: -0.6 }, // Rear left
+            { x: 0.45, y: 0.05, z: -0.6, id: "rear-right" }, // Rear right
+            { x: -0.45, y: 0.05, z: -0.6, id: "rear-left" }, // Rear left
         ];
 
-        // Get just the main ground/track mesh from the map builder
-        // This is more reliable than filtering by name
-        const groundMesh = this.mapBuilder.getGroundMesh();
+        // Calculate trail width and intensity based on drift factor and speed
+        const trailWidth = 0.12 + (this.driftIntensity * 0.08);  // Wider trails for more intense drifting
 
-        if (!groundMesh) return;
+        // We'll let the TrailSystem determine the color based on surface
+        // Instead of passing a color, we'll pass null to let the system decide
 
         // Only create trails for rear wheels (where drift marks would appear)
         for (const wheelPos of wheelPositions) {
@@ -419,8 +425,10 @@ export class CarController {
                 new THREE.Vector3(0, -1, 0)
             );
 
-            // Only check intersection with the ground mesh specifically
-            const intersects = this.raycaster.intersectObject(groundMesh, true);
+            // Check intersection with the terrain objects
+            const intersects = this.raycaster.intersectObjects(
+                this.mapBuilder.getTerrainObjects(), true
+            );
 
             if (intersects.length > 0) {
                 // Use the exact intersection point on the ground
@@ -428,10 +436,17 @@ export class CarController {
 
                 // Trails should be rendered right at ground level
                 // Add a tiny offset to prevent z-fighting with the ground
-                groundPoint.y += 0.005;
+                groundPoint.y += 0.01;
 
-                // Add trail at the exact ground point with car's rotation
-                this.trailSystem.addTrail(groundPoint, this.carGroup.rotation.y, this.driftTrailColor);
+                // Add trail segment at the exact ground point with car's rotation
+                // Pass null for color to let the TrailSystem determine it based on surface
+                this.trailSystem.addTrail(
+                    groundPoint,
+                    this.carGroup.rotation.y,
+                    undefined, // No specific color - let system determine based on surface
+                    wheelPos.id, // Unique ID for each wheel
+                    trailWidth   // Width parameter for the trail
+                );
             }
         }
     }

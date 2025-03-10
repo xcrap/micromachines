@@ -13,6 +13,7 @@ export class MapBuilder {
     private terrainObjects: THREE.Object3D[] = [];
     private trackPoints: THREE.Vector2[] = [];
     private groundMesh: THREE.Mesh | null = null;
+    private trackMesh: THREE.Mesh | null = null; // Store track mesh reference
 
     constructor(scene: THREE.Scene) {
         this.scene = scene;
@@ -51,8 +52,9 @@ export class MapBuilder {
 
     private createTrack(): void {
         if (!this.groundMesh) return;
-        const { trackPoints } = createTrack(this.scene, this.terrainObjects, this.groundMesh);
+        const { trackPoints, trackMesh } = createTrack(this.scene, this.terrainObjects, this.groundMesh);
         this.trackPoints = trackPoints;
+        this.trackMesh = trackMesh; // Store the track mesh
     }
 
     private createHills(): void {
@@ -155,5 +157,10 @@ export class MapBuilder {
             return (this.groundMesh as any).getHeightAt(x, z);
         }
         return 0;
+    }
+
+    // New method to expose the track mesh
+    public getTrackMesh(): THREE.Mesh | null {
+        return this.trackMesh;
     }
 }
