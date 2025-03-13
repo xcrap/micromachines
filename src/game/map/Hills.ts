@@ -16,12 +16,17 @@ export function createHills(
         getHeightAt: (x: number, z: number) => number
     }).getHeightAt;
 
+    // Define the map boundary to ensure hills are placed within the ground mesh
+    const mapRadius = 90; // Reduced from ground size of 200 (100 radius) to ensure hills fit completely
+
     while (hillsCreated < 15 && attempts < maxAttempts) {
         const radius = 6 + Math.random() * 12;
         const height = 1 + Math.random() * 3;
 
-        // Position hills farther from the center to avoid track
-        const distance = 40 + Math.random() * 80;
+        // Position hills with distance that ensures they're within map boundaries
+        // Account for hill radius to prevent edge placement
+        const maxDistance = mapRadius - radius;
+        const distance = 40 + Math.random() * (maxDistance - 40);
         const angle = Math.random() * Math.PI * 2;
 
         const x = Math.cos(angle) * distance;
@@ -39,6 +44,13 @@ export function createHills(
                 const checkAngle = (i / checkPoints) * Math.PI * 2;
                 const checkX = x + Math.cos(checkAngle) * checkRadius;
                 const checkZ = z + Math.sin(checkAngle) * checkRadius;
+
+                // Verify point is within map boundaries
+                const distanceFromCenter = Math.sqrt(checkX * checkX + checkZ * checkZ);
+                if (distanceFromCenter > mapRadius) {
+                    isValidPosition = false;
+                    break;
+                }
 
                 if (isPointOnTrack(checkX, checkZ)) {
                     isValidPosition = false;
