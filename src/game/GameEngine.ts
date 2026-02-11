@@ -15,6 +15,10 @@ export class GameEngine {
     private mapBuilder: MapBuilder;
     private isRunning = false;
     private cameraMode: "follow" | "free" = "follow";
+    private rafId: number | null = null;
+
+    private handleResize = () => this.onWindowResize();
+    private handleKeyDown = (e: KeyboardEvent) => this.onKeyDown(e);
 
     constructor(container: HTMLElement) {
         // Initialize Three.js scene
@@ -68,10 +72,10 @@ export class GameEngine {
         this.setupLights();
 
         // Handle window resize
-        window.addEventListener("resize", this.onWindowResize.bind(this));
+        window.addEventListener("resize", this.handleResize);
 
         // Handle camera mode toggle
-        window.addEventListener("keydown", this.onKeyDown.bind(this));
+        window.addEventListener("keydown", this.handleKeyDown);
     }
 
     private onKeyDown(event: KeyboardEvent): void {
@@ -141,6 +145,7 @@ export class GameEngine {
         this.camera.aspect = container.clientWidth / container.clientHeight;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(container.clientWidth, container.clientHeight);
+        this.mapBuilder.onResize(container.clientWidth, container.clientHeight);
     }
 
     public start(): void {
@@ -151,10 +156,10 @@ export class GameEngine {
         this.animate();
     }
 
-    private animate(): void {
+    private animate = (): void => {
         if (!this.isRunning) return;
 
-        requestAnimationFrame(this.animate.bind(this));
+        this.rafId = requestAnimationFrame(this.animate);
 
         const deltaTime = this.clock.getDelta();
         const elapsedTime = this.clock.getElapsedTime();
@@ -162,45 +167,52 @@ export class GameEngine {
         // Update car physics and controls
         this.carController.update(deltaTime);
 
+        // Update shader uniforms
+        this.mapBuilder.updateShaderTime(elapsedTime);
+
         // Update camera to follow car if in follow mode
         if (this.cameraMode === "follow") {
             this.updateCameraFollow();
         } else if (this.cameraMode === "free") {
             // In free mode, update the orbit controls target to follow the car
-            const carPosition = this.carController.getPosition();
+            const carPosition = this.carController.getPositionRef();
             this.controls.target.lerp(carPosition, 0.05);
             this.controls.update();
         }
-
 
         // Render scene
         this.renderer.render(this.scene, this.camera);
     }
 
+    private _cameraTarget = new THREE.Vector3();
+
     private updateCameraFollow(): void {
-        const carPosition = this.carController.getPosition();
-        const carDirection = this.carController.getDirection();
+        const carPosition = this.carController.getPositionRef();
+        const carDirection = this.carController.getDirectionRef();
 
         // Position camera behind and above the car
-        const cameraOffset = new THREE.Vector3(
-            -carDirection.x * 10, // Further back
-            8, // Higher up
-            -carDirection.z * 10, // Further back
+        this._cameraTarget.set(
+            carPosition.x - carDirection.x * 10,
+            carPosition.y + 8,
+            carPosition.z - carDirection.z * 10,
         );
 
-        const targetCameraPosition = carPosition.clone().add(cameraOffset);
-
         // Smoothly interpolate camera position
-        this.camera.position.lerp(targetCameraPosition, 0.05);
+        this.camera.position.lerp(this._cameraTarget, 0.05);
         this.camera.lookAt(carPosition);
     }
 
     public dispose(): void {
         this.isRunning = false;
 
+        if (this.rafId != null) {
+            cancelAnimationFrame(this.rafId);
+            this.rafId = null;
+        }
+
         // Remove event listeners
-        window.removeEventListener("resize", this.onWindowResize.bind(this));
-        window.removeEventListener("keydown", this.onKeyDown.bind(this));
+        window.removeEventListener("resize", this.handleResize);
+        window.removeEventListener("keydown", this.handleKeyDown);
         this.inputManager.dispose();
 
         // Dispose of car controller resources
@@ -212,6 +224,8 @@ export class GameEngine {
         }
 
         // Dispose Three.js resources
+        this.mapBuilder.dispose();
+        this.controls.dispose();
         this.renderer.dispose();
 
         // Remove canvas from DOM

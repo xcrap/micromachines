@@ -169,6 +169,15 @@ export class TrailSystem {
         return intersects.length > 0;
     }
 
+    private disposeMeshMaterial(mesh: THREE.Mesh): void {
+        const mat = mesh.material;
+        if (Array.isArray(mat)) {
+            for (const m of mat) m.dispose();
+        } else {
+            mat.dispose();
+        }
+    }
+
     public update(): void {
         const currentTime = Date.now() / 1000;
 
@@ -180,6 +189,7 @@ export class TrailSystem {
             // If the trail is older than lifetime, remove it
             if (age > this.TRAIL_LIFETIME) {
                 this.scene.remove(trail.mesh);
+                this.disposeMeshMaterial(trail.mesh);
                 this.trailParticles.splice(i, 1);
                 continue;
             }
@@ -201,6 +211,8 @@ export class TrailSystem {
             // If the segment is older than lifetime, remove it
             if (age > this.TRAIL_LIFETIME) {
                 this.scene.remove(segment.mesh);
+                this.disposeMeshMaterial(segment.mesh);
+                segment.mesh.geometry.dispose();
                 this.trailSegments.splice(i, 1);
                 continue;
             }
@@ -219,17 +231,14 @@ export class TrailSystem {
         // Clean up all trail particles
         for (const trail of this.trailParticles) {
             this.scene.remove(trail.mesh);
-            if (trail.mesh.material instanceof THREE.Material) {
-                trail.mesh.material.dispose();
-            }
+            this.disposeMeshMaterial(trail.mesh);
         }
 
         // Clean up all trail segments
         for (const segment of this.trailSegments) {
             this.scene.remove(segment.mesh);
-            if (segment.mesh.material instanceof THREE.Material) {
-                segment.mesh.material.dispose();
-            }
+            this.disposeMeshMaterial(segment.mesh);
+            segment.mesh.geometry.dispose();
         }
 
         this.trailGeometry.dispose();

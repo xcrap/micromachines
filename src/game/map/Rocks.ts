@@ -12,24 +12,23 @@ export function createRocks(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
         getHeightAt: (x: number, z: number) => number
     }).getHeightAt;
 
+    const rockMaterial = new THREE.MeshStandardMaterial({
+        color: 0x808080,
+        roughness: 0.9,
+        metalness: 0.2,
+    });
+
     while (rocksCreated < rockCount && attempts < maxAttempts) {
-        const rockGeometry = new THREE.DodecahedronGeometry(1 + Math.random());
-        const rockMaterial = new THREE.MeshStandardMaterial({
-            color: 0x808080,
-            roughness: 0.9,
-            metalness: 0.2,
-        });
-
-        const rock = new THREE.Mesh(rockGeometry, rockMaterial);
-
         const distance = 25 + Math.random() * 75;
         const angle = Math.random() * Math.PI * 2;
         const x = Math.cos(angle) * distance;
         const z = Math.sin(angle) * distance;
 
         if (!isPointOnTrack(x, z)) {
-            // Get the height at this position
             const y = getHeightAt(x, z);
+
+            const rockGeometry = new THREE.DodecahedronGeometry(1 + Math.random());
+            const rock = new THREE.Mesh(rockGeometry, rockMaterial);
 
             rock.position.set(x, y, z);
             rock.scale.set(

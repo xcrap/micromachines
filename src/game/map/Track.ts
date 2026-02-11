@@ -239,18 +239,15 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
     // Convert 3D points to 2D Vector2 for finish line creation
     const trackPoints2D = splinePoints.map(point => new THREE.Vector2(point.x, point.z));
 
-    // Handle window resize to update shader uniforms
-    window.addEventListener('resize', () => {
-        (trackMesh.material as THREE.ShaderMaterial).uniforms.u_resolution.value.set(
-            window.innerWidth,
-            window.innerHeight
-        );
-    });
+    const onResize = (width: number, height: number) => {
+        (trackMesh.material as THREE.ShaderMaterial).uniforms.u_resolution.value.set(width, height);
+    };
 
     return {
         trackMesh,
         trackPoints: trackPoints2D,
         startPosition: splinePoints[0],
-        startDirection: curve.getTangent(0)
+        startDirection: curve.getTangent(0),
+        onResize
     };
 }

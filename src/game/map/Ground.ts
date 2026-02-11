@@ -3,7 +3,7 @@ import * as THREE from "three";
 export function createGround(
     scene: THREE.Scene,
     terrainObjects: THREE.Object3D[],
-): THREE.Mesh {
+): { mesh: THREE.Mesh, onResize: (width: number, height: number) => void } {
     const groundSize = 200;
     const groundSegments = 150;
     const groundGeometry = new THREE.PlaneGeometry(
@@ -213,13 +213,9 @@ export function createGround(
     scene.add(groundMesh);
     terrainObjects.push(groundMesh);
 
-    // Handle window resize to update shader uniforms
-    window.addEventListener('resize', () => {
-        customGroundMesh.material.uniforms.u_resolution.value.set(
-            window.innerWidth,
-            window.innerHeight
-        );
-    });
+    const onResize = (width: number, height: number) => {
+        customGroundMesh.material.uniforms.u_resolution.value.set(width, height);
+    };
 
-    return groundMesh;
+    return { mesh: groundMesh, onResize };
 }

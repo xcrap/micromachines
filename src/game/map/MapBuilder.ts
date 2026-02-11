@@ -6,14 +6,20 @@ import { createTrees } from "./Trees";
 import { createRocks } from "./Rocks";
 import { createFinishLine } from "./FinishLine";
 
+export interface GroundMeshWithHeight extends THREE.Mesh {
+    getHeightAt(x: number, z: number): number;
+}
+
 export class MapBuilder {
     private scene: THREE.Scene;
     private trackPath: THREE.Shape;
     private trackWidth = 10; // Increased track width
     private terrainObjects: THREE.Object3D[] = [];
     private trackPoints: THREE.Vector2[] = [];
-    private groundMesh: THREE.Mesh | null = null;
-    private trackMesh: THREE.Mesh | null = null; // Store track mesh reference
+    private groundMesh: GroundMeshWithHeight | null = null;
+    private trackMesh: THREE.Mesh | null = null;
+    private groundResize: ((width: number, height: number) => void) | null = null;
+    private trackResize: ((width: number, height: number) => void) | null = null;
 
     constructor(scene: THREE.Scene) {
         this.scene = scene;
@@ -47,14 +53,17 @@ export class MapBuilder {
     }
 
     private createGround(): void {
-        this.groundMesh = createGround(this.scene, this.terrainObjects);
+        const { mesh, onResize } = createGround(this.scene, this.terrainObjects);
+        this.groundMesh = mesh as GroundMeshWithHeight;
+        this.groundResize = onResize;
     }
 
     private createTrack(): void {
         if (!this.groundMesh) return;
-        const { trackPoints, trackMesh } = createTrack(this.scene, this.terrainObjects, this.groundMesh);
+        const { trackPoints, trackMesh, onResize } = createTrack(this.scene, this.terrainObjects, this.groundMesh);
         this.trackPoints = trackPoints;
-        this.trackMesh = trackMesh; // Store the track mesh
+        this.trackMesh = trackMesh;
+        this.trackResize = onResize;
     }
 
     private createHills(): void {
@@ -85,39 +94,39 @@ export class MapBuilder {
     }
 
     public isPointOnTrack(x: number, z: number): boolean {
-        // Point we're checking
-        const testPoint = new THREE.Vector2(x, z);
-
-        // Find minimum distance to any track segment
-        let minDistance = Number.POSITIVE_INFINITY;
+        let minDistSq = Number.POSITIVE_INFINITY;
+        const threshold = this.trackWidth * 0.6;
+        const thresholdSq = threshold * threshold;
 
         for (let i = 0; i < this.trackPoints.length; i++) {
             const current = this.trackPoints[i];
             const next = this.trackPoints[(i + 1) % this.trackPoints.length];
 
-            // Calculate distance from point to this line segment
-            const lineSegment = new THREE.Line3(
-                new THREE.Vector3(current.x, 0, current.y),
-                new THREE.Vector3(next.x, 0, next.y)
-            );
+            // Point-to-segment distance using pure math (no allocations)
+            const dx = next.x - current.x;
+            const dz = next.y - current.y;
+            const lenSq = dx * dx + dz * dz;
 
-            const closestPoint = new THREE.Vector3();
-            lineSegment.closestPointToPoint(
-                new THREE.Vector3(x, 0, z),
-                true, // clamp to segment
-                closestPoint
-            );
+            let t = 0;
+            if (lenSq > 0) {
+                t = ((x - current.x) * dx + (z - current.y) * dz) / lenSq;
+                if (t < 0) t = 0;
+                else if (t > 1) t = 1;
+            }
 
-            const distance = new THREE.Vector2(closestPoint.x, closestPoint.z)
-                .distanceTo(testPoint);
+            const closestX = current.x + t * dx;
+            const closestZ = current.y + t * dz;
+            const ex = x - closestX;
+            const ez = z - closestZ;
+            const distSq = ex * ex + ez * ez;
 
-            if (distance < minDistance) {
-                minDistance = distance;
+            if (distSq < minDistSq) {
+                minDistSq = distSq;
+                if (minDistSq <= thresholdSq) return true;
             }
         }
 
-        // Consider point on track if within buffer width
-        return minDistance <= this.trackWidth * 0.6;
+        return minDistSq <= thresholdSq;
     }
 
     public getTerrainObjects(): THREE.Object3D[] {
@@ -128,7 +137,7 @@ export class MapBuilder {
         // Use the first track point
         if (this.trackPoints.length > 0 && this.groundMesh) {
             const startPoint = this.trackPoints[0];
-            const height = (this.groundMesh as any).getHeightAt(startPoint.x, startPoint.y) + 0.5;
+            const height = this.groundMesh.getHeightAt(startPoint.x, startPoint.y) + 0.5;
             return new THREE.Vector3(startPoint.x, height, startPoint.y);
         }
         return new THREE.Vector3(0, 0, -80); // Fallback to the first control point
@@ -154,13 +163,54 @@ export class MapBuilder {
     // This method helps adjust the terrain height at specific points, useful for debugging
     public getHeightAt(x: number, z: number): number {
         if (this.groundMesh) {
-            return (this.groundMesh as any).getHeightAt(x, z);
+            return this.groundMesh.getHeightAt(x, z);
         }
         return 0;
     }
 
-    // New method to expose the track mesh
     public getTrackMesh(): THREE.Mesh | null {
         return this.trackMesh;
+    }
+
+    public updateShaderTime(elapsedTime: number): void {
+        if (this.groundMesh) {
+            const groundMat = this.groundMesh.material as THREE.ShaderMaterial;
+            if (groundMat.uniforms?.u_time) {
+                groundMat.uniforms.u_time.value = elapsedTime;
+            }
+        }
+        if (this.trackMesh) {
+            const trackMat = this.trackMesh.material as THREE.ShaderMaterial;
+            if (trackMat.uniforms?.u_time) {
+                trackMat.uniforms.u_time.value = elapsedTime;
+            }
+        }
+    }
+
+    public onResize(width: number, height: number): void {
+        this.groundResize?.(width, height);
+        this.trackResize?.(width, height);
+    }
+
+    public dispose(): void {
+        for (const obj of this.terrainObjects) {
+            this.scene.remove(obj);
+            obj.traverse((child) => {
+                if (child instanceof THREE.Mesh) {
+                    child.geometry?.dispose();
+                    if (Array.isArray(child.material)) {
+                        child.material.forEach((m) => m.dispose());
+                    } else {
+                        child.material?.dispose();
+                    }
+                }
+            });
+        }
+        this.terrainObjects.length = 0;
+        this.trackPoints.length = 0;
+        this.groundMesh = null;
+        this.trackMesh = null;
+        this.groundResize = null;
+        this.trackResize = null;
     }
 }

@@ -1,23 +1,21 @@
 export class InputManager {
   private keys: Map<string, boolean> = new Map();
 
-  constructor() {
-    // Set up event listeners
-    window.addEventListener('keydown', this.onKeyDown.bind(this));
-    window.addEventListener('keyup', this.onKeyUp.bind(this));
-  }
-
-  private onKeyDown(event: KeyboardEvent): void {
-    // Prevent default behavior for game control keys to avoid page scrolling
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'q', 'a', 'o', 'p'].includes(event.key.toLowerCase())) {
+  private handleKeyDown = (event: KeyboardEvent): void => {
+    const key = event.key.toLowerCase();
+    if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' ', 'q', 'a', 'o', 'p'].includes(key)) {
       event.preventDefault();
     }
-    
-    this.keys.set(event.key.toLowerCase(), true);
-  }
+    this.keys.set(key, true);
+  };
 
-  private onKeyUp(event: KeyboardEvent): void {
+  private handleKeyUp = (event: KeyboardEvent): void => {
     this.keys.set(event.key.toLowerCase(), false);
+  };
+
+  constructor() {
+    window.addEventListener('keydown', this.handleKeyDown);
+    window.addEventListener('keyup', this.handleKeyUp);
   }
 
   public isKeyPressed(key: string): boolean {
@@ -25,11 +23,8 @@ export class InputManager {
   }
 
   public dispose(): void {
-    // Remove event listeners
-    window.removeEventListener('keydown', this.onKeyDown.bind(this));
-    window.removeEventListener('keyup', this.onKeyUp.bind(this));
-    
-    // Clear keys
+    window.removeEventListener('keydown', this.handleKeyDown);
+    window.removeEventListener('keyup', this.handleKeyUp);
     this.keys.clear();
   }
 }

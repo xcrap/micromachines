@@ -58,6 +58,22 @@ export class CarController {
     private readonly maxSuspension = 0.4;          // Max suspension extension
     private readonly chassisToGroundRest = 0.15;   // Target chassis height above ground
 
+    // Reusable temp objects to avoid per-frame allocations
+    private readonly _tmpVec3A = new THREE.Vector3();
+    private readonly _tmpVec3B = new THREE.Vector3();
+    private readonly _tmpVec3C = new THREE.Vector3();
+    private readonly _tmpVec3D = new THREE.Vector3();
+    private readonly _tmpQuatA = new THREE.Quaternion();
+    private readonly _tmpQuatB = new THREE.Quaternion();
+    private readonly _tmpMat3 = new THREE.Matrix3();
+    private readonly _upVector = new THREE.Vector3(0, 1, 0);
+    private readonly _downVector = new THREE.Vector3(0, -1, 0);
+    private readonly _collisionOrigin = new THREE.Vector3();
+    private readonly _collisionDirs: THREE.Vector3[] = [
+        new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()
+    ];
+    private readonly _validGroundObjects: THREE.Object3D[] = [];
+
     constructor(
         scene: THREE.Scene,
         inputManager: InputManager,
@@ -110,6 +126,10 @@ export class CarController {
             // Filter out the ground and track meshes
             return obj !== this.groundMesh && obj !== this.trackMesh;
         });
+
+        // Build valid ground objects array once
+        if (this.groundMesh) this._validGroundObjects.push(this.groundMesh);
+        if (this.trackMesh) this._validGroundObjects.push(this.trackMesh);
 
         // Initialize clock
         this.clock = new THREE.Clock();
@@ -174,24 +194,24 @@ export class CarController {
         this.direction.z = Math.cos(this.carGroup.rotation.y);
 
         // Create a lateral direction vector (perpendicular to main direction)
-        const lateralDirection = new THREE.Vector3(
+        const lateralDirection = this._tmpVec3A.set(
             -this.direction.z,  // perpendicular to forward direction
             0,
             this.direction.x
         );
 
         // Calculate new position with both forward velocity and lateral slide
-        const newPosition = this.position.clone();
+        const newPosition = this._tmpVec3B.copy(this.position);
 
         // Apply forward velocity
-        newPosition.x += this.direction.x * velocity * dt;
-        newPosition.z += this.direction.z * velocity * dt;
+        newPosition.x += this.direction.x * velocity * effectiveDeltaTime;
+        newPosition.z += this.direction.z * velocity * effectiveDeltaTime;
 
         // Apply lateral velocity for drift sliding effect - amplified for more obvious slide
         const amplifiedLateralVelocity = lateralVelocity * (velocity > 10 ? 1.2 : 1.0); // Amplify slide at higher speeds
         if (Math.abs(amplifiedLateralVelocity) > 0.1) {
-            newPosition.x += lateralDirection.x * amplifiedLateralVelocity * dt;
-            newPosition.z += lateralDirection.z * amplifiedLateralVelocity * dt;
+            newPosition.x += lateralDirection.x * amplifiedLateralVelocity * effectiveDeltaTime;
+            newPosition.z += lateralDirection.z * amplifiedLateralVelocity * effectiveDeltaTime;
         }
 
         // Check for collision with obstacles
@@ -206,7 +226,7 @@ export class CarController {
             this.carPhysics.reverseVelocity(0.5);
 
             // Apply a bounce effect - push away from collision point
-            const pushDirection = new THREE.Vector3().subVectors(this.position, collisionResult.collisionPoint).normalize();
+            const pushDirection = this._tmpVec3C.subVectors(this.position, collisionResult.collisionPoint).normalize();
             pushDirection.y = 0; // Keep on horizontal plane
 
             // Apply push based on speed at impact
@@ -234,7 +254,7 @@ export class CarController {
         const steeringEffectiveness = isDrifting ? lateralSlideFactor : 1.0;
 
         // Apply rotation based on steering and velocity
-        this.carGroup.rotation.y += carSteeringAngle * velocity * dt * steeringEffectiveness;
+        this.carGroup.rotation.y += carSteeringAngle * velocity * effectiveDeltaTime * steeringEffectiveness;
 
         // Apply visual tilt effects for drifting and lateral movement
         if (isDrifting && Math.abs(velocity) > 5) {
@@ -260,7 +280,7 @@ export class CarController {
             this.applyTerrainPhysics(dt);
         } else {
             // Apply airborne tilt and orientation
-            this.applyAirborneRotation(dt);
+            this.applyAirborneRotation();
         }
 
         // Update car position and rotation
@@ -268,7 +288,6 @@ export class CarController {
 
         // Handle drifting effects
         const speed = Math.abs(velocity);
-        const steeringAngle = Math.abs(carSteeringAngle);
 
         // Update drift state
         this.isDrifting = isDrifting && speed > 8;
@@ -340,7 +359,6 @@ export class CarController {
         if (!this.groundMesh && !this.trackMesh) return true;
 
         const minDistance = 0.5; // How far above ground to consider not grounded
-        let totalHeight = 0;
         let lowestPoint = Infinity;
 
         // Cast rays from each wheel position
@@ -349,13 +367,11 @@ export class CarController {
 
             // Start ray from slightly above
             this.raycaster.set(
-                new THREE.Vector3(worldWheelPos.x, worldWheelPos.y + 2, worldWheelPos.z),
-                new THREE.Vector3(0, -1, 0)
+                this._tmpVec3A.set(worldWheelPos.x, worldWheelPos.y + 2, worldWheelPos.z),
+                this._downVector
             );
 
-            // Check intersections with ground and track only
-            const validGroundObjects = [this.groundMesh, this.trackMesh].filter(obj => obj !== null);
-            const intersects = this.raycaster.intersectObjects(validGroundObjects as THREE.Object3D[]);
+            const intersects = this.raycaster.intersectObjects(this._validGroundObjects);
 
             if (intersects.length > 0) {
                 const distance = worldWheelPos.y - intersects[0].point.y;
@@ -367,11 +383,11 @@ export class CarController {
         return lowestPoint < minDistance;
     }
 
-    private applyAirborneRotation(dt: number): void {
+    private applyAirborneRotation(): void {
         // Gradually rotate the car to be level when in air
         if (this.airborneTime > 0.2) { // Only start leveling after a short time in air
             // Calculate target rotation to level out
-            const targetRotation = new THREE.Quaternion().setFromEuler(
+            const targetRotation = this._tmpQuatA.setFromEuler(
                 new THREE.Euler(0, this.carGroup.rotation.y, 0)
             );
 
@@ -396,21 +412,20 @@ export class CarController {
 
         // Check collision with each object in collision list
         let nearestCollision = Infinity;
-        let collisionPoint = new THREE.Vector3();
+        const collisionPoint = new THREE.Vector3();
         let hasCollision = false;
 
         // Check collisions in multiple directions for better coverage
-        const checkDirections = [
-            this.direction.clone(), // Forward
-            new THREE.Vector3(-this.direction.x, 0, -this.direction.z), // Backward
-            new THREE.Vector3(-this.direction.z, 0, this.direction.x), // Left
-            new THREE.Vector3(this.direction.z, 0, -this.direction.x), // Right
-        ];
+        this._collisionDirs[0].copy(this.direction); // Forward
+        this._collisionDirs[1].set(-this.direction.x, 0, -this.direction.z); // Backward
+        this._collisionDirs[2].set(-this.direction.z, 0, this.direction.x); // Left
+        this._collisionDirs[3].set(this.direction.z, 0, -this.direction.x); // Right
 
-        for (const direction of checkDirections) {
+        for (const direction of this._collisionDirs) {
             // Cast a ray in this direction
+            this._collisionOrigin.set(newPosition.x, newPosition.y + 0.3, newPosition.z);
             this.collisionRaycaster.set(
-                newPosition.clone().add(new THREE.Vector3(0, 0.3, 0)), // Start from slightly above ground
+                this._collisionOrigin, // Start from slightly above ground
                 direction
             );
 
@@ -451,13 +466,11 @@ export class CarController {
 
             // Cast ray downward from wheel position
             this.raycaster.set(
-                new THREE.Vector3(wheelPos.x, wheelPos.y + 2, wheelPos.z), // Start from above wheel
-                new THREE.Vector3(0, -1, 0) // Cast downward
+                this._tmpVec3A.set(wheelPos.x, wheelPos.y + 2, wheelPos.z), // Start from above wheel
+                this._downVector // Cast downward
             );
 
-            // Only check against ground and track, not obstacles
-            const validGroundObjects = [this.groundMesh, this.trackMesh].filter(obj => obj !== null);
-            const intersects = this.raycaster.intersectObjects(validGroundObjects as THREE.Object3D[], true);
+            const intersects = this.raycaster.intersectObjects(this._validGroundObjects, true);
 
             if (intersects.length > 0) {
                 // Store ground point and normal
@@ -470,13 +483,15 @@ export class CarController {
 
                 // Store ground normal for car orientation
                 if (i === 0) { // Just use first wheel's normal for orientation
-                    this.groundNormal = intersects[0].face?.normal.clone() || new THREE.Vector3(0, 1, 0);
+                    if (intersects[0].face) {
+                        this.groundNormal.copy(intersects[0].face.normal);
+                    } else {
+                        this.groundNormal.set(0, 1, 0);
+                    }
                     // Transform normal to world space
                     if (intersects[0].object.matrixWorld) {
-                        const normalMatrix = new THREE.Matrix3().getNormalMatrix(
-                            intersects[0].object.matrixWorld
-                        );
-                        this.groundNormal.applyMatrix3(normalMatrix).normalize();
+                        this._tmpMat3.getNormalMatrix(intersects[0].object.matrixWorld);
+                        this.groundNormal.applyMatrix3(this._tmpMat3).normalize();
                     }
                 }
 
@@ -527,28 +542,27 @@ export class CarController {
         // Apply car orientation based on suspension geometry
         if (this.wheelRayResults.length >= 3) {
             // Calculate plane from three points
-            const v1 = new THREE.Vector3().subVectors(
+            const v1 = this._tmpVec3A.subVectors(
                 this.wheelRayResults[1], this.wheelRayResults[0]
             );
-            const v2 = new THREE.Vector3().subVectors(
+            const v2 = this._tmpVec3B.subVectors(
                 this.wheelRayResults[2], this.wheelRayResults[0]
             );
 
             // Calculate normal of the plane using cross product
-            const normal = new THREE.Vector3().crossVectors(v1, v2).normalize();
+            const normal = this._tmpVec3C.crossVectors(v1, v2).normalize();
 
             // Only apply rotation if normal is mostly upward
             if (normal.y > 0.6) {
                 // Create quaternion to align with ground normal
-                const alignQuat = new THREE.Quaternion();
-                alignQuat.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
+                const alignQuat = this._tmpQuatA.setFromUnitVectors(this._upVector, normal);
 
                 // Preserve car's steering direction (y-rotation)
                 const carYRotation = this.carGroup.rotation.y;
 
                 // Apply orientation with smoothing
                 const smoothingFactor = 0.15;
-                const targetQuat = new THREE.Quaternion().setFromEuler(
+                const targetQuat = this._tmpQuatB.setFromEuler(
                     new THREE.Euler(0, carYRotation, 0)
                 );
                 targetQuat.premultiply(alignQuat);
@@ -605,18 +619,16 @@ export class CarController {
         for (const wheelPos of wheelPositions) {
             // Convert local wheel position to world position
             const worldPos = this.carGroup.localToWorld(
-                new THREE.Vector3(wheelPos.x, wheelPos.y, wheelPos.z),
+                this._tmpVec3A.set(wheelPos.x, wheelPos.y, wheelPos.z),
             );
 
             // Cast ray downward from slightly above the wheel position
             this.raycaster.set(
-                new THREE.Vector3(worldPos.x, worldPos.y + 2, worldPos.z),
-                new THREE.Vector3(0, -1, 0)
+                this._tmpVec3B.set(worldPos.x, worldPos.y + 2, worldPos.z),
+                this._downVector
             );
 
-            // Check intersection with the terrain objects - but only ground and track
-            const validGroundObjects = [this.groundMesh, this.trackMesh].filter(obj => obj !== null);
-            const intersects = this.raycaster.intersectObjects(validGroundObjects as THREE.Object3D[], true);
+            const intersects = this.raycaster.intersectObjects(this._validGroundObjects, true);
 
             if (intersects.length > 0) {
                 // Use the exact intersection point on the ground
@@ -645,6 +657,14 @@ export class CarController {
 
     public getDirection(): THREE.Vector3 {
         return this.direction.clone();
+    }
+
+    public getPositionRef(): Readonly<THREE.Vector3> {
+        return this.position;
+    }
+
+    public getDirectionRef(): Readonly<THREE.Vector3> {
+        return this.direction;
     }
 
     public dispose(): void {
