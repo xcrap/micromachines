@@ -37,7 +37,6 @@ export function createGround(
     // Create shader material for grass (without mouse interaction)
     const grassShaderMaterial = new THREE.ShaderMaterial({
         uniforms: {
-            u_time: { value: 0.0 },
             u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
         },
         vertexShader: `
@@ -51,7 +50,6 @@ export function createGround(
         fragmentShader: `
             precision mediump float;
 
-            uniform float u_time;
             uniform vec2 u_resolution;
             varying vec2 v_uv;
 
@@ -112,10 +110,9 @@ export function createGround(
                 uv.x *= u_resolution.x / u_resolution.y;
 
                 // Base terrain elevation
-                float elevation = fbm(uv * 2.0 + u_time * 0.05, 5) * 0.5 + 0.5;
+                float elevation = fbm(uv * 2.0, 5) * 0.5 + 0.5;
 
-                // Add grass detail with subtle movement
-                float detail = grassDetail(uv + vec2(u_time * 0.02, 0.0));
+                float detail = grassDetail(uv);
                 elevation += detail;
 
                 // Base green color for grass
@@ -134,13 +131,13 @@ export function createGround(
                 }
 
                 // Add some flowers
-                float flowerNoise = fbm(uv * 10.0 + vec2(0.0, u_time * 0.05), 2);
+                float flowerNoise = fbm(uv * 10.0, 2);
                 if (flowerNoise > 0.75 && elevation > 0.5) {
                     grassColor = mix(grassColor, flowers, (flowerNoise - 0.75) * 4.0);
                 }
 
                 // Add shadows and highlights based on time
-                float shadow = fbm(uv * 3.0 + vec2(u_time * 0.1, 0.0), 4) * 0.2;
+                float shadow = fbm(uv * 3.0, 4) * 0.2;
                 grassColor -= shadow;
 
                 // Apply a subtle vignette
