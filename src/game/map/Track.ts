@@ -21,9 +21,9 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
     const curve = new THREE.CatmullRomCurve3(controlPoints, true);
     curve.tension = 0.3;
 
-    // Increase divisions for a smoother path sampling.
     const divisions = 400;
-    const splinePoints = curve.getPoints(divisions);
+    const overlap = 6;
+    const totalRows = divisions + overlap;
 
     // Track geometry parameters — extra bleed for organic edge blending
     const trackWidth = 10;
@@ -33,16 +33,6 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
     const uvs = [];
     const indices = [];
 
-    // Compute normals by deriving the tangent and taking its perpendicular on the XZ plane.
-    const normals = [];
-    for (let i = 0; i < splinePoints.length; i++) {
-        const t = i / splinePoints.length;
-        const tangent3D = curve.getTangent(t);
-        const tangent2D = new THREE.Vector2(tangent3D.x, tangent3D.z).normalize();
-        const normal2D = new THREE.Vector2(-tangent2D.y, tangent2D.x);
-        normals.push(normal2D);
-    }
-
     // Get the height function
     const getHeightAt = (groundMesh as THREE.Mesh & {
         getHeightAt: (x: number, z: number) => number
@@ -50,33 +40,38 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
 
     const heightOffset = 0.35;
     const widthSegments = 6;
+    const vertsPerRow = widthSegments + 1;
 
-    for (let i = 0; i < splinePoints.length; i++) {
-        const point3D = splinePoints[i];
-        const n2D = normals[i];
+    for (let i = 0; i < totalRows; i++) {
+        const t = (i % divisions) / divisions;
+        const point3D = curve.getPoint(t);
+        const tangent3D = curve.getTangent(t);
+        const tangent2D = new THREE.Vector2(tangent3D.x, tangent3D.z).normalize();
+        const n2D = new THREE.Vector2(-tangent2D.y, tangent2D.x);
 
         for (let j = 0; j <= widthSegments; j++) {
-            const t = j / widthSegments;
-            const offset = (t - 0.5) * 2.0 * totalHalfW;
+            const u = j / widthSegments;
+            const offset = (u - 0.5) * 2.0 * totalHalfW;
             const px = point3D.x + n2D.x * offset;
             const pz = point3D.z + n2D.y * offset;
             const py = getHeightAt(px, pz) + heightOffset;
 
             vertices.push(px, py, pz);
-            uvs.push(t, i / splinePoints.length);
+            uvs.push(u, i / divisions);
         }
 
-        const vertsPerRow = widthSegments + 1;
-        const rowStart = i * vertsPerRow;
-        const nextRowStart = ((i + 1) % splinePoints.length) * vertsPerRow;
+        if (i < totalRows - 1) {
+            const rowStart = i * vertsPerRow;
+            const nextRowStart = (i + 1) * vertsPerRow;
 
-        for (let j = 0; j < widthSegments; j++) {
-            const a = rowStart + j;
-            const b = rowStart + j + 1;
-            const c = nextRowStart + j;
-            const d = nextRowStart + j + 1;
-            indices.push(a, b, c);
-            indices.push(b, d, c);
+            for (let j = 0; j < widthSegments; j++) {
+                const a = rowStart + j;
+                const b = rowStart + j + 1;
+                const c = nextRowStart + j;
+                const d = nextRowStart + j + 1;
+                indices.push(a, b, c);
+                indices.push(b, d, c);
+            }
         }
     }
 
@@ -87,7 +82,7 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
     geometry.setIndex(indices);
     geometry.computeVertexNormals();
 
-    const edgeRatio = bleedWidth / (trackWidth / 2 + bleedWidth);
+    const edgeRatio = bleedWidth / (trackWidth + 2 * bleedWidth);
 
     const trackShaderMaterial = new THREE.ShaderMaterial({
         uniforms: {
@@ -96,7 +91,10 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
             u_edgeRatio: { value: edgeRatio }
         },
         transparent: true,
-        depthWrite: true,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
         vertexShader: `
             varying vec2 v_uv;
             varying vec3 v_worldPos;
@@ -251,12 +249,12 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
     scene.add(trackMesh);
     terrainObjects.push(trackMesh);
 
+    const splinePoints = curve.getPoints(divisions).slice(0, -1);
     for (let i = 0; i < splinePoints.length; i++) {
         const point = splinePoints[i];
         point.y = getHeightAt(point.x, point.z) + heightOffset;
     }
 
-    // Convert 3D points to 2D Vector2 for finish line creation
     const trackPoints2D = splinePoints.map(point => new THREE.Vector2(point.x, point.z));
 
     const onResize = (width: number, height: number) => {
