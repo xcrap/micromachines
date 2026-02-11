@@ -25,8 +25,10 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
     const divisions = 400;
     const splinePoints = curve.getPoints(divisions);
 
-    // Track geometry parameters.
+    // Track geometry parameters — extra bleed for organic edge blending
     const trackWidth = 10;
+    const bleedWidth = 3.0;
+    const totalHalfW = trackWidth / 2 + bleedWidth;
     const vertices = [];
     const uvs = [];
     const indices = [];
@@ -46,36 +48,25 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
         getHeightAt: (x: number, z: number) => number
     }).getHeightAt;
 
-    // Build the strip geometry along the curve.
     for (let i = 0; i < splinePoints.length; i++) {
         const point3D = splinePoints[i];
         const n2D = normals[i];
-        const halfW = trackWidth / 2;
 
-        // Calculate outer and inner edge positions
-        const outerX = point3D.x + n2D.x * halfW;
-        const outerZ = point3D.z + n2D.y * halfW;
+        const outerX = point3D.x + n2D.x * totalHalfW;
+        const outerZ = point3D.z + n2D.y * totalHalfW;
 
-        const innerX = point3D.x - n2D.x * halfW;
-        const innerZ = point3D.z - n2D.y * halfW;
+        const innerX = point3D.x - n2D.x * totalHalfW;
+        const innerZ = point3D.z - n2D.y * totalHalfW;
 
-        // Get heights at the exact outer and inner positions (with a small elevation to avoid z-fighting)
         const outerHeight = getHeightAt(outerX, outerZ) + 0.15;
         const innerHeight = getHeightAt(innerX, innerZ) + 0.15;
 
-        // Outer edge vertex
         vertices.push(outerX, outerHeight, outerZ);
-
-        // Inner edge vertex
         vertices.push(innerX, innerHeight, innerZ);
 
-        // UV mapping along the track.
-        // We'll make the vertical coordinate (v) run along the track
-        // and the horizontal coordinate (u) go from left edge (0) to right edge (1)
         uvs.push(0, i / splinePoints.length);
         uvs.push(1, i / splinePoints.length);
 
-        // Construct triangles for the quad between segments.
         const idx = i * 2;
         const nextIdx = ((i + 1) % splinePoints.length) * 2;
         indices.push(idx, idx + 1, nextIdx);
@@ -89,133 +80,164 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
     geometry.setIndex(indices);
     geometry.computeVertexNormals();
 
-    // Custom shader material for the track without mouse interaction
+    const edgeRatio = bleedWidth / (trackWidth / 2 + bleedWidth);
+
     const trackShaderMaterial = new THREE.ShaderMaterial({
         uniforms: {
             u_time: { value: 0.0 },
-            u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
+            u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+            u_edgeRatio: { value: edgeRatio }
         },
+        transparent: true,
+        depthWrite: true,
         vertexShader: `
             varying vec2 v_uv;
+            varying vec3 v_worldPos;
 
             void main() {
                 v_uv = uv;
+                v_worldPos = (modelMatrix * vec4(position, 1.0)).xyz;
                 gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
             }
         `,
         fragmentShader: `
-            precision mediump float;
+            precision highp float;
 
-            uniform float u_time;
-            uniform vec2 u_resolution;
+            uniform float u_edgeRatio;
             varying vec2 v_uv;
+            varying vec3 v_worldPos;
 
-            // Hash function for random values
-            float hash(float n) {
-                return fract(sin(n) * 43758.5453);
+            float hash(vec2 p) {
+                return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
             }
 
-            // 2D noise function
+            float hash2(vec2 p) {
+                return fract(sin(dot(p, vec2(269.5, 183.3))) * 43758.5453);
+            }
+
             float noise(vec2 p) {
                 vec2 i = floor(p);
                 vec2 f = fract(p);
                 f = f * f * (3.0 - 2.0 * f);
-                float n = i.x + i.y * 57.0;
                 return mix(
-                    mix(hash(n), hash(n + 1.0), f.x),
-                    mix(hash(n + 57.0), hash(n + 58.0), f.x),
+                    mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+                    mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x),
                     f.y
                 );
             }
 
-            // Fractional Brownian Motion
-            float fbm(vec2 p) {
+            float fbm(vec2 p, int octaves) {
                 float value = 0.0;
-                float amplitude = 0.5;
-                float frequency = 2.0;
-                for (int i = 0; i < 5; i++) {
-                    value += amplitude * noise(p * frequency);
-                    amplitude *= 0.5;
-                    frequency *= 2.0;
+                float amp = 0.5;
+                float freq = 1.0;
+                for (int i = 0; i < 6; i++) {
+                    if (i >= octaves) break;
+                    value += amp * noise(p * freq);
+                    amp *= 0.5;
+                    freq *= 2.0;
                 }
                 return value;
             }
 
-            // Tire track pattern
-            float tireTrack(vec2 uv, float offset) {
-                float track = 0.0;
-
-                // Track width and grooves
-                float trackWidth = 0.3;
-                float grooveWidth = 0.03;
-                float grooveDepth = 0.7;
-
-                // Calculate distance from track center
-                float dist = abs(uv.x - offset);
-
-                // Main track
-                if (dist < trackWidth) {
-                    track = 1.0;
-
-                    // Add tire grooves
-                    float groovePattern = sin(uv.y * 30.0) * 0.5 + 0.5;
-                    if (mod(uv.y * 10.0 + sin(uv.x * 5.0) * 0.5, 1.0) < 0.5 * groovePattern) {
-                        track *= grooveDepth;
+            float voronoi(vec2 p) {
+                vec2 i = floor(p);
+                vec2 f = fract(p);
+                float minDist = 1.0;
+                for (int y = -1; y <= 1; y++) {
+                    for (int x = -1; x <= 1; x++) {
+                        vec2 neighbor = vec2(float(x), float(y));
+                        vec2 point = vec2(hash(i + neighbor), hash2(i + neighbor));
+                        vec2 diff = neighbor + point - f;
+                        minDist = min(minDist, dot(diff, diff));
                     }
                 }
-
-                return track;
+                return sqrt(minDist);
             }
 
             void main() {
-                // Correct aspect ratio
                 vec2 uv = v_uv;
-                float aspect = u_resolution.x / u_resolution.y;
+                vec2 wp = v_worldPos.xz * 0.15;
 
-                // Dirt road base color
-                vec3 dirtColor1 = vec3(0.45, 0.29, 0.18); // Dark brown
-                vec3 dirtColor2 = vec3(0.60, 0.40, 0.25); // Medium brown
-                vec3 dirtColor3 = vec3(0.76, 0.56, 0.38); // Light brown
+                // Organic edge alpha — noise-driven fade in the bleed margin
+                float edgeDist = min(uv.x, 1.0 - uv.x);
+                float edgeNorm = edgeDist / u_edgeRatio;
 
-                // Create base dirt texture with noise
-                float dirtNoise = fbm(uv * 5.0 + u_time * 0.05);
-                float dirtDetail = fbm(uv * 20.0 - u_time * 0.02);
+                float edgeNoise1 = fbm(wp * 3.0 + vec2(77.0, 33.0), 4);
+                float edgeNoise2 = noise(wp * 8.0 + vec2(11.0, 55.0));
+                float edgeNoise3 = noise(wp * 16.0 + vec2(44.0, 22.0));
+                float noisyEdge = edgeNorm + (edgeNoise1 - 0.5) * 0.5
+                                           + (edgeNoise2 - 0.5) * 0.2
+                                           + (edgeNoise3 - 0.5) * 0.1;
 
-                // Combine noise layers for dirt texture
-                float dirtPattern = dirtNoise * 0.7 + dirtDetail * 0.3;
+                float edgeAlpha = smoothstep(0.0, 0.6, noisyEdge);
+                if (edgeAlpha < 0.01) discard;
 
-                // Mix dirt colors based on noise
-                vec3 baseColor = mix(dirtColor1, dirtColor2, dirtPattern);
-                baseColor = mix(baseColor, dirtColor3, dirtDetail * dirtDetail * 0.5);
+                // Remap UV to track-only portion (excluding bleed)
+                float trackU = (uv.x - u_edgeRatio) / (1.0 - 2.0 * u_edgeRatio);
+                trackU = clamp(trackU, 0.0, 1.0);
 
-                // Add small stones/pebbles
-                float pebbles = smoothstep(0.75, 0.8, noise(uv * 40.0));
-                baseColor = mix(baseColor, vec3(0.65, 0.6, 0.55), pebbles * 0.3);
+                vec3 dirtDark = vec3(0.32, 0.22, 0.13);
+                vec3 dirtMid = vec3(0.48, 0.34, 0.22);
+                vec3 dirtLight = vec3(0.58, 0.44, 0.30);
+                vec3 dirtPale = vec3(0.65, 0.52, 0.38);
+                vec3 mudDark = vec3(0.22, 0.16, 0.10);
+                vec3 gravelGrey = vec3(0.55, 0.52, 0.48);
 
-                // Add tire tracks
-                float leftTrack = tireTrack(uv, 0.3);
-                float rightTrack = tireTrack(uv, 0.7);
+                float coarseNoise = fbm(wp * 1.5 + vec2(3.7, 8.2), 4);
+                float medNoise = fbm(wp * 4.0 + vec2(12.1, 5.9), 5);
+                float fineNoise = fbm(wp * 12.0 + vec2(7.3, 22.1), 4);
+                float microDetail = noise(wp * 30.0 + vec2(1.3, 4.7));
 
-                // Combine tracks and make them darker
-                float tracks = max(leftTrack, rightTrack);
-                vec3 trackColor = dirtColor1 * 0.7;
+                float dirtBlend = coarseNoise * 0.5 + medNoise * 0.35 + fineNoise * 0.15;
 
-                // Apply tracks to base color
-                vec3 finalColor = mix(baseColor, trackColor, tracks * 0.6);
+                vec3 baseColor = mix(dirtDark, dirtMid, smoothstep(0.25, 0.55, dirtBlend));
+                baseColor = mix(baseColor, dirtLight, smoothstep(0.5, 0.75, dirtBlend));
+                baseColor = mix(baseColor, dirtPale, smoothstep(0.7, 0.9, coarseNoise) * 0.3);
 
-                // Add some puddles/mud
-                float puddles = smoothstep(0.6, 0.7, fbm(uv * 3.0 + u_time * 0.1));
-                finalColor = mix(finalColor, vec3(0.25, 0.2, 0.15), puddles * 0.5);
+                baseColor += (microDetail - 0.5) * 0.06;
 
-                // Add some variation based on time
-                finalColor *= 0.9 + 0.1 * sin(u_time * 0.2);
+                float gravelPattern = voronoi(wp * 18.0);
+                float gravelMask = smoothstep(0.08, 0.18, gravelPattern);
+                float gravelScatter = smoothstep(0.55, 0.65, noise(wp * 6.0 + vec2(9.1, 3.3)));
+                baseColor = mix(baseColor, gravelGrey * (0.8 + gravelPattern * 0.3), gravelScatter * (1.0 - gravelMask) * 0.4);
 
-                // Output final color
-                gl_FragColor = vec4(finalColor, 1.0);
+                float pebbleMask = smoothstep(0.82, 0.88, noise(wp * 25.0 + vec2(44.0, 17.0)));
+                vec3 pebbleColor = vec3(0.5 + hash(floor(wp * 25.0)) * 0.15, 0.48, 0.44);
+                baseColor = mix(baseColor, pebbleColor, pebbleMask * 0.35);
 
-                #ifdef PHYSICAL
-                  #include <colorspace_fragment>
-                #endif
+                float rut1 = smoothstep(0.08, 0.0, abs(trackU - 0.28 + noise(vec2(uv.y * 8.0, 1.0)) * 0.04));
+                float rut2 = smoothstep(0.08, 0.0, abs(trackU - 0.72 + noise(vec2(uv.y * 8.0, 5.0)) * 0.04));
+                float ruts = max(rut1, rut2);
+
+                float rutNoise = noise(vec2(uv.y * 40.0, trackU * 5.0));
+                ruts *= 0.7 + rutNoise * 0.3;
+
+                vec3 rutColor = dirtDark * 0.75;
+                baseColor = mix(baseColor, rutColor, ruts * 0.55);
+
+                float crackSeed = noise(wp * 3.0 + vec2(55.0, 33.0));
+                float crackDetail = voronoi(wp * 8.0 + vec2(crackSeed * 2.0));
+                float crackLine = smoothstep(0.02, 0.05, crackDetail);
+                float crackMask = smoothstep(0.6, 0.8, noise(wp * 1.5 + vec2(20.0, 10.0)));
+                baseColor *= mix(1.0, crackLine * 0.85 + 0.15, crackMask * 0.5);
+
+                float muddyAreas = smoothstep(0.55, 0.7, fbm(wp * 2.0 + vec2(15.0, 25.0), 4));
+                float wetness = muddyAreas * 0.45;
+                baseColor = mix(baseColor, mudDark, wetness);
+                baseColor *= 1.0 - wetness * 0.15;
+
+                float dustPatches = smoothstep(0.6, 0.75, fbm(wp * 2.5 + vec2(40.0, 60.0), 3));
+                baseColor = mix(baseColor, dirtPale * 1.1, dustPatches * 0.2);
+
+                // Edge color transition: dirt→grassy-brown at margins
+                float innerEdge = smoothstep(0.0, 0.18, edgeDist / max(u_edgeRatio, 0.01));
+                vec3 edgeTint = mix(vec3(0.30, 0.33, 0.18), dirtDark, 0.4);
+                baseColor = mix(edgeTint, baseColor, innerEdge);
+
+                float ao = 0.92 + fineNoise * 0.08;
+                baseColor *= ao;
+
+                gl_FragColor = vec4(baseColor, edgeAlpha);
             }
         `,
         side: THREE.DoubleSide,
