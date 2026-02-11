@@ -23,6 +23,7 @@ export class CarController {
     private lastTrailTime = 0;
     private readonly TRAIL_SPAWN_INTERVAL: number = 0.05;
     private driftIntensity = 0;
+    private wasTrailing = false;
 
     // Collision detection
     private collisionRaycaster: THREE.Raycaster;
@@ -285,15 +286,19 @@ export class CarController {
             Math.min(1.0, Math.abs(lateralVelocity) / 8.0)
         );
 
-        // Create drift trails when sliding
         const hasSlide = Math.abs(slipAngle) > 0.03 || Math.abs(lateralVelocity) > 0.8;
-        if ((this.isDrifting || hasSlide) && speed > 3 && this.isGrounded) {
+        const shouldTrail = (this.isDrifting || hasSlide) && speed > 3 && this.isGrounded;
+
+        if (shouldTrail) {
             const currentTime = this.clock.getElapsedTime();
             if (currentTime - this.lastTrailTime > this.TRAIL_SPAWN_INTERVAL) {
                 this.createDriftTrails();
                 this.lastTrailTime = currentTime;
             }
+        } else if (this.wasTrailing) {
+            this.trailSystem.breakAllTrails();
         }
+        this.wasTrailing = shouldTrail;
 
         // Update trail system
         this.trailSystem.update();

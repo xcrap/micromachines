@@ -48,29 +48,36 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
         getHeightAt: (x: number, z: number) => number
     }).getHeightAt;
 
+    const heightOffset = 0.35;
+    const widthSegments = 6;
+
     for (let i = 0; i < splinePoints.length; i++) {
         const point3D = splinePoints[i];
         const n2D = normals[i];
 
-        const outerX = point3D.x + n2D.x * totalHalfW;
-        const outerZ = point3D.z + n2D.y * totalHalfW;
+        for (let j = 0; j <= widthSegments; j++) {
+            const t = j / widthSegments;
+            const offset = (t - 0.5) * 2.0 * totalHalfW;
+            const px = point3D.x + n2D.x * offset;
+            const pz = point3D.z + n2D.y * offset;
+            const py = getHeightAt(px, pz) + heightOffset;
 
-        const innerX = point3D.x - n2D.x * totalHalfW;
-        const innerZ = point3D.z - n2D.y * totalHalfW;
+            vertices.push(px, py, pz);
+            uvs.push(t, i / splinePoints.length);
+        }
 
-        const outerHeight = getHeightAt(outerX, outerZ) + 0.15;
-        const innerHeight = getHeightAt(innerX, innerZ) + 0.15;
+        const vertsPerRow = widthSegments + 1;
+        const rowStart = i * vertsPerRow;
+        const nextRowStart = ((i + 1) % splinePoints.length) * vertsPerRow;
 
-        vertices.push(outerX, outerHeight, outerZ);
-        vertices.push(innerX, innerHeight, innerZ);
-
-        uvs.push(0, i / splinePoints.length);
-        uvs.push(1, i / splinePoints.length);
-
-        const idx = i * 2;
-        const nextIdx = ((i + 1) % splinePoints.length) * 2;
-        indices.push(idx, idx + 1, nextIdx);
-        indices.push(idx + 1, nextIdx + 1, nextIdx);
+        for (let j = 0; j < widthSegments; j++) {
+            const a = rowStart + j;
+            const b = rowStart + j + 1;
+            const c = nextRowStart + j;
+            const d = nextRowStart + j + 1;
+            indices.push(a, b, c);
+            indices.push(b, d, c);
+        }
     }
 
     // Create BufferGeometry.
@@ -169,7 +176,9 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
                                            + (edgeNoise2 - 0.5) * 0.2
                                            + (edgeNoise3 - 0.5) * 0.1;
 
-                float edgeAlpha = smoothstep(0.0, 0.6, noisyEdge);
+                float edgeAlpha = edgeDist > u_edgeRatio
+                    ? 1.0
+                    : smoothstep(0.0, 0.6, noisyEdge);
                 if (edgeAlpha < 0.01) discard;
 
                 // Remap UV to track-only portion (excluding bleed)
@@ -205,16 +214,6 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
                 vec3 pebbleColor = vec3(0.5 + hash(floor(wp * 25.0)) * 0.15, 0.48, 0.44);
                 baseColor = mix(baseColor, pebbleColor, pebbleMask * 0.35);
 
-                float rut1 = smoothstep(0.08, 0.0, abs(trackU - 0.28 + noise(vec2(uv.y * 8.0, 1.0)) * 0.04));
-                float rut2 = smoothstep(0.08, 0.0, abs(trackU - 0.72 + noise(vec2(uv.y * 8.0, 5.0)) * 0.04));
-                float ruts = max(rut1, rut2);
-
-                float rutNoise = noise(vec2(uv.y * 40.0, trackU * 5.0));
-                ruts *= 0.7 + rutNoise * 0.3;
-
-                vec3 rutColor = dirtDark * 0.75;
-                baseColor = mix(baseColor, rutColor, ruts * 0.55);
-
                 float crackSeed = noise(wp * 3.0 + vec2(55.0, 33.0));
                 float crackDetail = voronoi(wp * 8.0 + vec2(crackSeed * 2.0));
                 float crackLine = smoothstep(0.02, 0.05, crackDetail);
@@ -246,16 +245,15 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
     trackShaderMaterial.needsUpdate = true;
     trackShaderMaterial.uniforms.u_resolution.value.set(window.innerWidth, window.innerHeight);
 
-    // Create the mesh and add it to the scene.
     const trackMesh = new THREE.Mesh(geometry, trackShaderMaterial);
     trackMesh.receiveShadow = true;
+    trackMesh.renderOrder = -200;
     scene.add(trackMesh);
     terrainObjects.push(trackMesh);
 
-    // Update splinePoints with correct heights for use in other functions
     for (let i = 0; i < splinePoints.length; i++) {
         const point = splinePoints[i];
-        point.y = getHeightAt(point.x, point.z) + 0.15;
+        point.y = getHeightAt(point.x, point.z) + heightOffset;
     }
 
     // Convert 3D points to 2D Vector2 for finish line creation

@@ -168,7 +168,10 @@ export function createGround(
                 #endif
             }
         `,
-        side: THREE.DoubleSide
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: 1,
+        polygonOffsetUnits: 1
     });
 
     // Make sure these settings are applied to our shader material

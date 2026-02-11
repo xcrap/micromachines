@@ -35,7 +35,6 @@ class TrailRibbon {
     private hasLastPosition = false;
     private posAttr: THREE.BufferAttribute;
     private alphaAttr: THREE.BufferAttribute;
-    private indexAttr: THREE.BufferAttribute;
 
     private _tmpRight = new THREE.Vector3();
 
@@ -56,7 +55,7 @@ class TrailRibbon {
         const indices = new Uint16Array((this.maxPoints - 1) * 6);
         for (let i = 0; i < this.maxPoints - 1; i++) {
             const ci = i * 2;
-            const ni = ((i + 1) % this.maxPoints) * 2;
+            const ni = (i + 1) * 2;
             const base = i * 6;
             indices[base] = ci;
             indices[base + 1] = ci + 1;
@@ -65,9 +64,7 @@ class TrailRibbon {
             indices[base + 4] = ci + 1;
             indices[base + 5] = ni + 1;
         }
-        this.indexAttr = new THREE.BufferAttribute(indices, 1);
-        this.geometry.setIndex(this.indexAttr);
-
+        this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
         this.geometry.setDrawRange(0, 0);
 
         this.mesh = new THREE.Mesh(this.geometry, material);
@@ -76,6 +73,8 @@ class TrailRibbon {
     }
 
     addPoint(position: THREE.Vector3, forward: THREE.Vector3, width: number): void {
+        if (this.head >= this.maxPoints) return;
+
         if (this.hasLastPosition) {
             const dist = position.distanceTo(this.lastPosition);
             if (dist < MIN_DISTANCE) return;
@@ -102,8 +101,8 @@ class TrailRibbon {
         this.alphas[idx] = 0.65;
         this.alphas[idx + 1] = 0.65;
 
-        this.head = (this.head + 1) % this.maxPoints;
-        if (this.count < this.maxPoints) this.count++;
+        this.head++;
+        if (this.count < this.head) this.count = this.head;
 
         this.lastPosition.copy(position);
         this.hasLastPosition = true;
@@ -113,34 +112,23 @@ class TrailRibbon {
         this.alphaAttr.needsUpdate = true;
     }
 
-    update(_deltaTime: number): void {
-        if (this.count === 0) return;
+    update(deltaTime: number): boolean {
+        if (this.count === 0) return false;
 
         let anyVisible = false;
         for (let i = 0; i < this.count * 2; i++) {
             if (this.alphas[i] > 0) {
-                this.alphas[i] = Math.max(0, this.alphas[i] - FADE_RATE * _deltaTime);
+                this.alphas[i] = Math.max(0, this.alphas[i] - FADE_RATE * deltaTime);
                 if (this.alphas[i] > 0.001) anyVisible = true;
             }
         }
 
-        if (!anyVisible && this.count > 0) {
-            this.count = 0;
-            this.head = 0;
-            this.hasLastPosition = false;
-            this.geometry.setDrawRange(0, 0);
-        }
-
         this.alphaAttr.needsUpdate = true;
+        return anyVisible;
     }
 
-    reset(): void {
-        this.count = 0;
-        this.head = 0;
-        this.hasLastPosition = false;
-        this.alphas.fill(0);
-        this.geometry.setDrawRange(0, 0);
-        this.alphaAttr.needsUpdate = true;
+    isFull(): boolean {
+        return this.head >= this.maxPoints;
     }
 
     private updateDrawRange(): void {
@@ -148,12 +136,7 @@ class TrailRibbon {
             this.geometry.setDrawRange(0, 0);
             return;
         }
-
-        if (this.count < this.maxPoints) {
-            this.geometry.setDrawRange(0, (this.count - 1) * 6);
-        } else {
-            this.geometry.setDrawRange(0, (this.maxPoints - 1) * 6);
-        }
+        this.geometry.setDrawRange(0, (this.count - 1) * 6);
     }
 
     dispose(): void {
@@ -163,7 +146,8 @@ class TrailRibbon {
 
 export class TrailSystem {
     private scene: THREE.Scene;
-    private ribbons = new Map<string, TrailRibbon>();
+    private activeRibbons = new Map<string, TrailRibbon>();
+    private fadingRibbons: TrailRibbon[] = [];
     private trackMaterial: THREE.ShaderMaterial;
     private grassMaterial: THREE.ShaderMaterial;
     private raycaster = new THREE.Raycaster();
@@ -217,15 +201,17 @@ export class TrailSystem {
         const isOnTrack = this.isOnTrackSurface(position);
         const material = isOnTrack ? this.trackMaterial : this.grassMaterial;
 
-        let ribbon = this.ribbons.get(wheelId);
-        if (!ribbon || ribbon.mesh.material !== material) {
-            if (ribbon) {
-                this.scene.remove(ribbon.mesh);
-                ribbon.dispose();
-            }
+        let ribbon = this.activeRibbons.get(wheelId);
+
+        if (ribbon && (ribbon.mesh.material !== material || ribbon.isFull())) {
+            this.retireRibbon(wheelId);
+            ribbon = undefined;
+        }
+
+        if (!ribbon) {
             ribbon = new TrailRibbon(material);
             this.scene.add(ribbon.mesh);
-            this.ribbons.set(wheelId, ribbon);
+            this.activeRibbons.set(wheelId, ribbon);
         }
 
         this._tmpForward.set(Math.sin(rotation), 0, Math.cos(rotation));
@@ -236,19 +222,49 @@ export class TrailSystem {
         ribbon.addPoint(position, this._tmpForward, finalWidth);
     }
 
+    breakAllTrails(): void {
+        const wheelIds = [...this.activeRibbons.keys()];
+        for (const wheelId of wheelIds) {
+            this.retireRibbon(wheelId);
+        }
+    }
+
+    private retireRibbon(wheelId: string): void {
+        const ribbon = this.activeRibbons.get(wheelId);
+        if (ribbon) {
+            this.fadingRibbons.push(ribbon);
+            this.activeRibbons.delete(wheelId);
+        }
+    }
+
     update(): void {
         const dt = this.clock.getDelta();
-        for (const ribbon of this.ribbons.values()) {
+
+        for (const ribbon of this.activeRibbons.values()) {
             ribbon.update(dt);
+        }
+
+        for (let i = this.fadingRibbons.length - 1; i >= 0; i--) {
+            const alive = this.fadingRibbons[i].update(dt);
+            if (!alive) {
+                this.scene.remove(this.fadingRibbons[i].mesh);
+                this.fadingRibbons[i].dispose();
+                this.fadingRibbons.splice(i, 1);
+            }
         }
     }
 
     dispose(): void {
-        for (const ribbon of this.ribbons.values()) {
+        for (const ribbon of this.activeRibbons.values()) {
             this.scene.remove(ribbon.mesh);
             ribbon.dispose();
         }
-        this.ribbons.clear();
+        this.activeRibbons.clear();
+        for (const ribbon of this.fadingRibbons) {
+            this.scene.remove(ribbon.mesh);
+            ribbon.dispose();
+        }
+        this.fadingRibbons.length = 0;
         this.trackMaterial.dispose();
         this.grassMaterial.dispose();
     }
