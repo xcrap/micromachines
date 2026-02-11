@@ -1,263 +1,273 @@
 import * as THREE from 'three';
 
-interface TrailParticle {
-    mesh: THREE.Mesh;
-    creationTime: number;
-    position: THREE.Vector3;
-    previousPosition?: THREE.Vector3; // To track previous position for line segments
-    width: number;
+const TRAIL_VERTEX_SHADER = `
+attribute float alpha;
+varying float vAlpha;
+void main() {
+    vAlpha = alpha;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
+`;
 
-interface TrailSegment {
-    mesh: THREE.Mesh;
-    creationTime: number;
-    startPosition: THREE.Vector3;
-    endPosition: THREE.Vector3;
+const TRAIL_FRAGMENT_SHADER = `
+uniform vec3 color;
+varying float vAlpha;
+void main() {
+    gl_FragColor = vec4(color, vAlpha);
+}
+`;
+
+const TRACK_COLOR = new THREE.Color(0x2a1a0a);
+const GRASS_COLOR = new THREE.Color(0x1a3a0a);
+const MAX_POINTS = 200;
+const MIN_DISTANCE = 0.03;
+const FADE_RATE = 0.08;
+
+class TrailRibbon {
+    private maxPoints = MAX_POINTS;
+    private positions: Float32Array;
+    private alphas: Float32Array;
+    private head = 0;
+    private count = 0;
+    readonly mesh: THREE.Mesh;
+    private geometry: THREE.BufferGeometry;
+    private lastPosition = new THREE.Vector3();
+    private hasLastPosition = false;
+    private posAttr: THREE.BufferAttribute;
+    private alphaAttr: THREE.BufferAttribute;
+    private indexAttr: THREE.BufferAttribute;
+
+    private _tmpRight = new THREE.Vector3();
+
+    constructor(material: THREE.ShaderMaterial) {
+        const vertexCount = this.maxPoints * 2;
+        this.positions = new Float32Array(vertexCount * 3);
+        this.alphas = new Float32Array(vertexCount);
+
+        this.geometry = new THREE.BufferGeometry();
+        this.posAttr = new THREE.BufferAttribute(this.positions, 3);
+        this.posAttr.setUsage(THREE.DynamicDrawUsage);
+        this.alphaAttr = new THREE.BufferAttribute(this.alphas, 1);
+        this.alphaAttr.setUsage(THREE.DynamicDrawUsage);
+
+        this.geometry.setAttribute('position', this.posAttr);
+        this.geometry.setAttribute('alpha', this.alphaAttr);
+
+        const indices = new Uint16Array((this.maxPoints - 1) * 6);
+        for (let i = 0; i < this.maxPoints - 1; i++) {
+            const ci = i * 2;
+            const ni = ((i + 1) % this.maxPoints) * 2;
+            const base = i * 6;
+            indices[base] = ci;
+            indices[base + 1] = ci + 1;
+            indices[base + 2] = ni;
+            indices[base + 3] = ni;
+            indices[base + 4] = ci + 1;
+            indices[base + 5] = ni + 1;
+        }
+        this.indexAttr = new THREE.BufferAttribute(indices, 1);
+        this.geometry.setIndex(this.indexAttr);
+
+        this.geometry.setDrawRange(0, 0);
+
+        this.mesh = new THREE.Mesh(this.geometry, material);
+        this.mesh.frustumCulled = false;
+        this.mesh.renderOrder = -100;
+    }
+
+    addPoint(position: THREE.Vector3, forward: THREE.Vector3, width: number): void {
+        if (this.hasLastPosition) {
+            const dist = position.distanceTo(this.lastPosition);
+            if (dist < MIN_DISTANCE) return;
+        }
+
+        this._tmpRight.set(-forward.z, 0, forward.x).normalize();
+
+        const halfW = width * 0.5;
+        const idx = this.head * 2;
+
+        const lx = position.x - this._tmpRight.x * halfW;
+        const lz = position.z - this._tmpRight.z * halfW;
+        const rx = position.x + this._tmpRight.x * halfW;
+        const rz = position.z + this._tmpRight.z * halfW;
+
+        this.positions[idx * 3] = lx;
+        this.positions[idx * 3 + 1] = position.y;
+        this.positions[idx * 3 + 2] = lz;
+
+        this.positions[(idx + 1) * 3] = rx;
+        this.positions[(idx + 1) * 3 + 1] = position.y;
+        this.positions[(idx + 1) * 3 + 2] = rz;
+
+        this.alphas[idx] = 0.65;
+        this.alphas[idx + 1] = 0.65;
+
+        this.head = (this.head + 1) % this.maxPoints;
+        if (this.count < this.maxPoints) this.count++;
+
+        this.lastPosition.copy(position);
+        this.hasLastPosition = true;
+
+        this.updateDrawRange();
+        this.posAttr.needsUpdate = true;
+        this.alphaAttr.needsUpdate = true;
+    }
+
+    update(_deltaTime: number): void {
+        if (this.count === 0) return;
+
+        let anyVisible = false;
+        for (let i = 0; i < this.count * 2; i++) {
+            if (this.alphas[i] > 0) {
+                this.alphas[i] = Math.max(0, this.alphas[i] - FADE_RATE * _deltaTime);
+                if (this.alphas[i] > 0.001) anyVisible = true;
+            }
+        }
+
+        if (!anyVisible && this.count > 0) {
+            this.count = 0;
+            this.head = 0;
+            this.hasLastPosition = false;
+            this.geometry.setDrawRange(0, 0);
+        }
+
+        this.alphaAttr.needsUpdate = true;
+    }
+
+    reset(): void {
+        this.count = 0;
+        this.head = 0;
+        this.hasLastPosition = false;
+        this.alphas.fill(0);
+        this.geometry.setDrawRange(0, 0);
+        this.alphaAttr.needsUpdate = true;
+    }
+
+    private updateDrawRange(): void {
+        if (this.count < 2) {
+            this.geometry.setDrawRange(0, 0);
+            return;
+        }
+
+        if (this.count < this.maxPoints) {
+            this.geometry.setDrawRange(0, (this.count - 1) * 6);
+        } else {
+            this.geometry.setDrawRange(0, (this.maxPoints - 1) * 6);
+        }
+    }
+
+    dispose(): void {
+        this.geometry.dispose();
+    }
 }
 
 export class TrailSystem {
     private scene: THREE.Scene;
-    private trailParticles: TrailParticle[] = [];
-    private trailSegments: TrailSegment[] = [];
-    private trailMaterial: THREE.MeshBasicMaterial;
-    private trailGeometry: THREE.PlaneGeometry;
-    private readonly TRAIL_LIFETIME: number = 5; // Increased to 5 seconds lifetime
-    private trailColor: THREE.Color;
-    private validObjectsCache: Map<string, boolean> = new Map();
-    private invalidObjectsCache: Map<string, boolean> = new Map();
-    private lastTrailPositions: Map<string, THREE.Vector3> = new Map(); // Track last position by wheel ID
-    raycaster: THREE.Raycaster;
+    private ribbons = new Map<string, TrailRibbon>();
+    private trackMaterial: THREE.ShaderMaterial;
+    private grassMaterial: THREE.ShaderMaterial;
+    private raycaster = new THREE.Raycaster();
     private trackObjects: THREE.Object3D[] = [];
+    private clock = new THREE.Clock();
+    private trailColor: THREE.Color;
 
-    constructor(scene: THREE.Scene, color = 0x333333) {
+    private _tmpForward = new THREE.Vector3();
+    private _tmpRayOrigin = new THREE.Vector3();
+    private _downDir = new THREE.Vector3(0, -1, 0);
+
+    constructor(scene: THREE.Scene, color?: number) {
         this.scene = scene;
-        this.trailColor = new THREE.Color(color);
-        this.raycaster = new THREE.Raycaster();
+        this.trailColor = new THREE.Color(color ?? 0x333333);
 
-        // Create material with transparency for fading
-        this.trailMaterial = new THREE.MeshBasicMaterial({
-            color: this.trailColor,
+        this.trackMaterial = new THREE.ShaderMaterial({
+            uniforms: { color: { value: TRACK_COLOR } },
+            vertexShader: TRAIL_VERTEX_SHADER,
+            fragmentShader: TRAIL_FRAGMENT_SHADER,
             transparent: true,
-            opacity: 0.7,
+            depthWrite: false,
+            depthTest: true,
             side: THREE.DoubleSide,
-            depthWrite: false, // Prevent z-fighting
-            blending: THREE.AdditiveBlending, // Better visibility
-            // Ensure trails are rendered below other objects
-            depthTest: true
+            blending: THREE.NormalBlending,
         });
 
-        // Small plane for each trail particle
-        this.trailGeometry = new THREE.PlaneGeometry(1, 1); // We'll scale it later
+        this.grassMaterial = new THREE.ShaderMaterial({
+            uniforms: { color: { value: GRASS_COLOR } },
+            vertexShader: TRAIL_VERTEX_SHADER,
+            fragmentShader: TRAIL_FRAGMENT_SHADER,
+            transparent: true,
+            depthWrite: false,
+            depthTest: true,
+            side: THREE.DoubleSide,
+            blending: THREE.NormalBlending,
+        });
     }
 
-    public setTrackObjects(trackObjects: THREE.Object3D[]): void {
+    setTrackObjects(trackObjects: THREE.Object3D[]): void {
         this.trackObjects = trackObjects;
     }
 
-    public addTrail(position: THREE.Vector3, rotation: number, color?: THREE.Color, wheelId: string = 'default', width: number = 0.08): void {
-        // Check if position is on track or ground and adjust color accordingly
+    addTrail(
+        position: THREE.Vector3,
+        rotation: number,
+        color?: THREE.Color,
+        wheelId: string = 'default',
+        width: number = 0.08,
+        intensity: number = 0.5
+    ): void {
         const isOnTrack = this.isOnTrackSurface(position);
+        const material = isOnTrack ? this.trackMaterial : this.grassMaterial;
 
-        // Create a material for this trail
-        const material = this.trailMaterial.clone();
-
-        // Set color based on surface if not explicitly provided
-        if (!color) {
-            if (isOnTrack) {
-                // Brown for track
-                material.color = new THREE.Color(0x8B4513);
-            } else {
-                // Green for grass/ground
-                material.color = new THREE.Color(0x4CAF50);
+        let ribbon = this.ribbons.get(wheelId);
+        if (!ribbon || ribbon.mesh.material !== material) {
+            if (ribbon) {
+                this.scene.remove(ribbon.mesh);
+                ribbon.dispose();
             }
-        } else {
-            material.color = color;
+            ribbon = new TrailRibbon(material);
+            this.scene.add(ribbon.mesh);
+            this.ribbons.set(wheelId, ribbon);
         }
 
-        // Get previous position for this wheel
-        const prevPosition = this.lastTrailPositions.get(wheelId);
+        this._tmpForward.set(Math.sin(rotation), 0, Math.cos(rotation));
 
-        // Create a trail segment if we have a previous position
-        if (prevPosition && position.distanceTo(prevPosition) < 0.5) {
-            // Create a line segment between the two points
-            const segment = this.createTrailSegment(prevPosition, position, rotation, material, width);
-            if (segment) {
-                this.trailSegments.push(segment);
-            }
-        } else {
-            // If no previous position or too far away, just create a single mark
-            const mesh = new THREE.Mesh(this.trailGeometry, material);
-            mesh.renderOrder = -100;
+        const driftWidth = THREE.MathUtils.lerp(0.06, 0.18, THREE.MathUtils.clamp(intensity, 0, 1));
+        const finalWidth = Math.max(width, driftWidth);
 
-            mesh.position.set(position.x, position.y + 0.01, position.z);
-            mesh.rotation.x = -Math.PI / 2;
-            mesh.rotation.z = rotation;
-
-            // Scale the mesh to desired width
-            mesh.scale.set(0.15, width, 1);
-
-            this.scene.add(mesh);
-
-            const trailParticle: TrailParticle = {
-                mesh,
-                creationTime: Date.now() / 1000, // Current time in seconds
-                position: position.clone(),
-                width: width
-            };
-
-            this.trailParticles.push(trailParticle);
-        }
-
-        // Update the last position for this wheel
-        this.lastTrailPositions.set(wheelId, position.clone());
+        ribbon.addPoint(position, this._tmpForward, finalWidth);
     }
 
-    private createTrailSegment(startPos: THREE.Vector3, endPos: THREE.Vector3, rotation: number, material: THREE.Material, width: number): TrailSegment | null {
-        // Calculate the length of the segment
-        const length = startPos.distanceTo(endPos);
-        if (length < 0.01) {
-            return null; // Too short to create a segment
-        }
-
-        // Create a custom geometry for the segment
-        const segmentGeometry = new THREE.PlaneGeometry(length, width);
-
-        // Create mesh
-        const mesh = new THREE.Mesh(segmentGeometry, material);
-        mesh.renderOrder = -100;
-
-        // Position at the midpoint between start and end
-        const midPoint = new THREE.Vector3().addVectors(startPos, endPos).multiplyScalar(0.5);
-        mesh.position.set(midPoint.x, midPoint.y + 0.01, midPoint.z);
-
-        // Calculate the direction from start to end
-        const direction = new THREE.Vector3().subVectors(endPos, startPos);
-        const angle = Math.atan2(direction.x, direction.z);
-
-        // Rotate to lie flat on ground
-        mesh.rotation.x = -Math.PI / 2;
-        // Rotate to match the line direction
-        mesh.rotation.z = angle;
-
-        // Add to scene
-        this.scene.add(mesh);
-
-        return {
-            mesh,
-            creationTime: Date.now() / 1000,
-            startPosition: startPos.clone(),
-            endPosition: endPos.clone()
-        };
-    }
-
-    private isOnTrackSurface(position: THREE.Vector3): boolean {
-        // If no track objects are set, we can't determine surface
-        if (this.trackObjects.length === 0) {
-            return true;
-        }
-
-        // Cast ray down from slightly above position
-        this.raycaster.set(
-            new THREE.Vector3(position.x, position.y + 1, position.z),
-            new THREE.Vector3(0, -1, 0)
-        );
-
-        // Check intersection with track objects
-        const intersects = this.raycaster.intersectObjects(this.trackObjects, true);
-
-        // Return true if we hit a track object
-        return intersects.length > 0;
-    }
-
-    private disposeMeshMaterial(mesh: THREE.Mesh): void {
-        const mat = mesh.material;
-        if (Array.isArray(mat)) {
-            for (const m of mat) m.dispose();
-        } else {
-            mat.dispose();
+    update(): void {
+        const dt = this.clock.getDelta();
+        for (const ribbon of this.ribbons.values()) {
+            ribbon.update(dt);
         }
     }
 
-    public update(): void {
-        const currentTime = Date.now() / 1000;
-
-        // Update each trail particle
-        for (let i = this.trailParticles.length - 1; i >= 0; i--) {
-            const trail = this.trailParticles[i];
-            const age = currentTime - trail.creationTime;
-
-            // If the trail is older than lifetime, remove it
-            if (age > this.TRAIL_LIFETIME) {
-                this.scene.remove(trail.mesh);
-                this.disposeMeshMaterial(trail.mesh);
-                this.trailParticles.splice(i, 1);
-                continue;
-            }
-
-            // Calculate opacity based on age (fading out)
-            const opacity = 1 - (age / this.TRAIL_LIFETIME);
-
-            // Update material opacity
-            if (trail.mesh.material instanceof THREE.MeshBasicMaterial) {
-                trail.mesh.material.opacity = opacity * 0.7; // Max opacity is 0.7
-            }
+    dispose(): void {
+        for (const ribbon of this.ribbons.values()) {
+            this.scene.remove(ribbon.mesh);
+            ribbon.dispose();
         }
-
-        // Update each trail segment
-        for (let i = this.trailSegments.length - 1; i >= 0; i--) {
-            const segment = this.trailSegments[i];
-            const age = currentTime - segment.creationTime;
-
-            // If the segment is older than lifetime, remove it
-            if (age > this.TRAIL_LIFETIME) {
-                this.scene.remove(segment.mesh);
-                this.disposeMeshMaterial(segment.mesh);
-                segment.mesh.geometry.dispose();
-                this.trailSegments.splice(i, 1);
-                continue;
-            }
-
-            // Calculate opacity based on age (fading out)
-            const opacity = 1 - (age / this.TRAIL_LIFETIME);
-
-            // Update material opacity
-            if (segment.mesh.material instanceof THREE.MeshBasicMaterial) {
-                segment.mesh.material.opacity = opacity * 0.7; // Max opacity is 0.7
-            }
-        }
+        this.ribbons.clear();
+        this.trackMaterial.dispose();
+        this.grassMaterial.dispose();
     }
 
-    public dispose(): void {
-        // Clean up all trail particles
-        for (const trail of this.trailParticles) {
-            this.scene.remove(trail.mesh);
-            this.disposeMeshMaterial(trail.mesh);
-        }
-
-        // Clean up all trail segments
-        for (const segment of this.trailSegments) {
-            this.scene.remove(segment.mesh);
-            this.disposeMeshMaterial(segment.mesh);
-            segment.mesh.geometry.dispose();
-        }
-
-        this.trailGeometry.dispose();
-        this.trailMaterial.dispose();
-        this.trailParticles = [];
-        this.trailSegments = [];
-
-        // Clear caches
-        this.validObjectsCache.clear();
-        this.invalidObjectsCache.clear();
-        this.lastTrailPositions.clear();
-    }
-
-    public setTrailColor(color: THREE.Color | number): void {
+    setTrailColor(color: THREE.Color | number): void {
         if (color instanceof THREE.Color) {
             this.trailColor = color;
         } else {
             this.trailColor = new THREE.Color(color);
         }
-        this.trailMaterial.color = this.trailColor;
+    }
+
+    private isOnTrackSurface(position: THREE.Vector3): boolean {
+        if (this.trackObjects.length === 0) return true;
+
+        this._tmpRayOrigin.set(position.x, position.y + 1, position.z);
+        this.raycaster.set(this._tmpRayOrigin, this._downDir);
+
+        const intersects = this.raycaster.intersectObjects(this.trackObjects, true);
+        return intersects.length > 0;
     }
 }

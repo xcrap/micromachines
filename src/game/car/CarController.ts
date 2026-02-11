@@ -22,7 +22,6 @@ export class CarController {
     private isDrifting = false;
     private lastTrailTime = 0;
     private readonly TRAIL_SPAWN_INTERVAL: number = 0.05;
-    private driftTrailColor = new THREE.Color(0x333333);
     private driftIntensity = 0;
 
     // Collision detection
@@ -186,16 +185,19 @@ export class CarController {
 
         // Apply physics to car position and rotation
         const velocity = this.carPhysics.getVelocity();
-        const carSteeringAngle = this.carPhysics.getSteeringAngle();
         const lateralVelocity = this.carPhysics.getLateralVelocity();
 
-        // Update direction vector based on steering
+        // Apply yaw rate to car rotation
+        const yawRate = this.carPhysics.getYawRate();
+        this.carGroup.rotation.y += yawRate * effectiveDeltaTime;
+
+        // Update direction vector from current heading
         this.direction.x = Math.sin(this.carGroup.rotation.y);
         this.direction.z = Math.cos(this.carGroup.rotation.y);
 
         // Create a lateral direction vector (perpendicular to main direction)
         const lateralDirection = this._tmpVec3A.set(
-            -this.direction.z,  // perpendicular to forward direction
+            -this.direction.z,
             0,
             this.direction.x
         );
@@ -207,11 +209,10 @@ export class CarController {
         newPosition.x += this.direction.x * velocity * effectiveDeltaTime;
         newPosition.z += this.direction.z * velocity * effectiveDeltaTime;
 
-        // Apply lateral velocity for drift sliding effect - amplified for more obvious slide
-        const amplifiedLateralVelocity = lateralVelocity * (velocity > 10 ? 1.2 : 1.0); // Amplify slide at higher speeds
-        if (Math.abs(amplifiedLateralVelocity) > 0.1) {
-            newPosition.x += lateralDirection.x * amplifiedLateralVelocity * effectiveDeltaTime;
-            newPosition.z += lateralDirection.z * amplifiedLateralVelocity * effectiveDeltaTime;
+        // Apply lateral velocity from tire slip
+        if (Math.abs(lateralVelocity) > 0.05) {
+            newPosition.x += lateralDirection.x * lateralVelocity * effectiveDeltaTime;
+            newPosition.z += lateralDirection.z * lateralVelocity * effectiveDeltaTime;
         }
 
         // Check for collision with obstacles
@@ -244,32 +245,20 @@ export class CarController {
         // Apply gravity and vertical motion
         this.applyGravity(dt);
 
-        // Update rotation based on steering and apply a drift effect
         const isDrifting = this.carPhysics.isDrifting();
         const driftFactor = this.carPhysics.getDriftFactor();
+        const slipAngle = this.carPhysics.getSlipAngle();
 
-        // With strong lateral sliding, reduce the steering effect on rotation
-        // This makes the car appear to slide more and turn less during drift
-        const lateralSlideFactor = Math.min(1.0, Math.max(0, 1.0 - Math.abs(lateralVelocity) * 0.08));
-        const steeringEffectiveness = isDrifting ? lateralSlideFactor : 1.0;
+        // Apply visual tilt based on slip angle and lateral velocity
+        if (Math.abs(slipAngle) > 0.02 && Math.abs(velocity) > 3) {
+            const rollTarget = -Math.sign(lateralVelocity) * Math.min(Math.abs(lateralVelocity * 0.04), 0.18);
+            const pitchTarget = driftFactor * 0.02;
 
-        // Apply rotation based on steering and velocity
-        this.carGroup.rotation.y += carSteeringAngle * velocity * effectiveDeltaTime * steeringEffectiveness;
-
-        // Apply visual tilt effects for drifting and lateral movement
-        if (isDrifting && Math.abs(velocity) > 5) {
-            // Tilt the car based on lateral velocity for more realistic leaning into drift
-            const lateralTilt = -Math.sign(lateralVelocity) * Math.min(Math.abs(lateralVelocity * 0.06), 0.25);
-
-            // Tilt front end slightly down during drift for dynamic effect
-            this.carGroup.rotation.x = 0.025 * driftFactor;
-
-            // Apply z-axis tilt based on lateral movement (lean effect)
-            this.carGroup.rotation.z = lateralTilt;
+            this.carGroup.rotation.z += (rollTarget - this.carGroup.rotation.z) * 0.15;
+            this.carGroup.rotation.x += (pitchTarget - this.carGroup.rotation.x) * 0.15;
         } else {
-            // Smoothly reset tilts
-            this.carGroup.rotation.z *= 0.9;
-            this.carGroup.rotation.x *= 0.9;
+            this.carGroup.rotation.z *= 0.88;
+            this.carGroup.rotation.x *= 0.88;
         }
 
         // Update car wheels rotation based on velocity
@@ -289,24 +278,21 @@ export class CarController {
         // Handle drifting effects
         const speed = Math.abs(velocity);
 
-        // Update drift state
-        this.isDrifting = isDrifting && speed > 8;
-        this.driftIntensity = driftFactor;
+        // Update drift state based on slip angle and lateral velocity
+        this.isDrifting = isDrifting && speed > 5;
+        this.driftIntensity = Math.max(
+            driftFactor,
+            Math.min(1.0, Math.abs(lateralVelocity) / 8.0)
+        );
 
-        // Create drift trails when drifting or with significant lateral velocity
-        const hasLateralSlide = Math.abs(lateralVelocity) > 1.5;
-        if ((this.isDrifting || (hasLateralSlide && speed > 8)) && this.isGrounded) {
+        // Create drift trails when sliding
+        const hasSlide = Math.abs(slipAngle) > 0.03 || Math.abs(lateralVelocity) > 0.8;
+        if ((this.isDrifting || hasSlide) && speed > 3 && this.isGrounded) {
             const currentTime = this.clock.getElapsedTime();
             if (currentTime - this.lastTrailTime > this.TRAIL_SPAWN_INTERVAL) {
                 this.createDriftTrails();
                 this.lastTrailTime = currentTime;
             }
-
-            // Make trail intensity depend on both drift factor and lateral velocity
-            const slideIntensity = Math.abs(lateralVelocity) / 4.0;
-            const trailIntensity = Math.max(slideIntensity, this.driftIntensity * 0.15);
-            const colorIntensity = 0.2 + trailIntensity;
-            this.driftTrailColor.setRGB(colorIntensity, colorIntensity, colorIntensity);
         }
 
         // Update trail system
@@ -599,30 +585,19 @@ export class CarController {
         this.carGroup.position.copy(this.position);
     }
 
+    private readonly _rearWheels = [
+        { x: 0.48, y: 0.05, z: -0.55, id: "rear-right" },
+        { x: -0.48, y: 0.05, z: -0.55, id: "rear-left" },
+    ];
+
     private createDriftTrails(): void {
-        // Only create trails if the car is on the ground
         if (!this.isGrounded) return;
 
-        // Define wheel positions for trails (rear wheels only)
-        const wheelPositions = [
-            { x: 0.45, y: 0.05, z: -0.6, id: "rear-right" }, // Rear right
-            { x: -0.45, y: 0.05, z: -0.6, id: "rear-left" }, // Rear left
-        ];
-
-        // Calculate trail width and intensity based on drift factor and speed
-        const trailWidth = 0.12 + (this.driftIntensity * 0.08);  // Wider trails for more intense drifting
-
-        // We'll let the TrailSystem determine the color based on surface
-        // Instead of passing a color, we'll pass null to let the system decide
-
-        // Only create trails for rear wheels (where drift marks would appear)
-        for (const wheelPos of wheelPositions) {
-            // Convert local wheel position to world position
+        for (const wheelPos of this._rearWheels) {
             const worldPos = this.carGroup.localToWorld(
                 this._tmpVec3A.set(wheelPos.x, wheelPos.y, wheelPos.z),
             );
 
-            // Cast ray downward from slightly above the wheel position
             this.raycaster.set(
                 this._tmpVec3B.set(worldPos.x, worldPos.y + 2, worldPos.z),
                 this._downVector
@@ -631,21 +606,16 @@ export class CarController {
             const intersects = this.raycaster.intersectObjects(this._validGroundObjects, true);
 
             if (intersects.length > 0) {
-                // Use the exact intersection point on the ground
                 const groundPoint = intersects[0].point.clone();
+                groundPoint.y += 0.02;
 
-                // Trails should be rendered right at ground level
-                // Add a tiny offset to prevent z-fighting with the ground
-                groundPoint.y += 0.01;
-
-                // Add trail segment at the exact ground point with car's rotation
-                // Pass null for color to let the TrailSystem determine it based on surface
                 this.trailSystem.addTrail(
                     groundPoint,
                     this.carGroup.rotation.y,
-                    undefined, // No specific color - let system determine based on surface
-                    wheelPos.id, // Unique ID for each wheel
-                    trailWidth   // Width parameter for the trail
+                    undefined,
+                    wheelPos.id,
+                    0.08,
+                    this.driftIntensity,
                 );
             }
         }
