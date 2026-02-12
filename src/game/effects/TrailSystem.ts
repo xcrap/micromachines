@@ -69,7 +69,8 @@ class TrailRibbon {
 
         this.mesh = new THREE.Mesh(this.geometry, material);
         this.mesh.frustumCulled = false;
-        this.mesh.renderOrder = -100;
+        this.mesh.renderOrder = 999;
+        this.mesh.position.y = 0.05;
     }
 
     addPoint(position: THREE.Vector3, forward: THREE.Vector3, width: number): void {
@@ -153,15 +154,13 @@ export class TrailSystem {
     private raycaster = new THREE.Raycaster();
     private trackObjects: THREE.Object3D[] = [];
     private clock = new THREE.Clock();
-    private trailColor: THREE.Color;
 
     private _tmpForward = new THREE.Vector3();
     private _tmpRayOrigin = new THREE.Vector3();
     private _downDir = new THREE.Vector3(0, -1, 0);
 
-    constructor(scene: THREE.Scene, color?: number) {
+    constructor(scene: THREE.Scene) {
         this.scene = scene;
-        this.trailColor = new THREE.Color(color ?? 0x333333);
 
         this.trackMaterial = new THREE.ShaderMaterial({
             uniforms: { color: { value: TRACK_COLOR } },
@@ -193,7 +192,7 @@ export class TrailSystem {
     addTrail(
         position: THREE.Vector3,
         rotation: number,
-        color?: THREE.Color,
+        _color?: THREE.Color,
         wheelId: string = 'default',
         width: number = 0.08,
         intensity: number = 0.5
@@ -267,14 +266,6 @@ export class TrailSystem {
         this.fadingRibbons.length = 0;
         this.trackMaterial.dispose();
         this.grassMaterial.dispose();
-    }
-
-    setTrailColor(color: THREE.Color | number): void {
-        if (color instanceof THREE.Color) {
-            this.trailColor = color;
-        } else {
-            this.trailColor = new THREE.Color(color);
-        }
     }
 
     private isOnTrackSurface(position: THREE.Vector3): boolean {

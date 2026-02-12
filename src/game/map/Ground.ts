@@ -34,16 +34,17 @@ export function createGround(
     // Update the geometry
     groundGeometry.computeVertexNormals();
 
-    // Create shader material for grass (without mouse interaction)
     const grassShaderMaterial = new THREE.ShaderMaterial({
         uniforms: {
             u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
         },
         vertexShader: `
             varying vec2 v_uv;
+            varying vec3 v_worldPos;
 
             void main() {
                 v_uv = uv;
+                v_worldPos = (modelMatrix * vec4(position, 1.0)).xyz;
                 gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
             }
         `,
@@ -52,103 +53,80 @@ export function createGround(
 
             uniform vec2 u_resolution;
             varying vec2 v_uv;
+            varying vec3 v_worldPos;
 
-            // Simplex 2D noise
-            vec3 permute(vec3 x) { return mod(((x*34.0)+1.0)*x, 289.0); }
-
-            float snoise(vec2 v) {
-              const vec4 C = vec4(0.211324865405187, 0.366025403784439,
-                       -0.577350269189626, 0.024390243902439);
-              vec2 i  = floor(v + dot(v, C.yy));
-              vec2 x0 = v -   i + dot(i, C.xx);
-              vec2 i1;
-              i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
-              vec4 x12 = x0.xyxy + C.xxzz;
-              x12.xy -= i1;
-              i = mod(i, 289.0);
-              vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0))
-              + i.x + vec3(0.0, i1.x, 1.0));
-              vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy),
-                dot(x12.zw,x12.zw)), 0.0);
-              m = m*m;
-              m = m*m;
-              vec3 x = 2.0 * fract(p * C.www) - 1.0;
-              vec3 h = abs(x) - 0.5;
-              vec3 ox = floor(x + 0.5);
-              vec3 a0 = x - ox;
-              m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
-              vec3 g;
-              g.x  = a0.x  * x0.x  + h.x  * x0.y;
-              g.yz = a0.yz * x12.xz + h.yz * x12.yw;
-              return 130.0 * dot(m, g);
+            float hash(vec2 p) {
+                return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
             }
 
-            // FBM function
+            float hash2(vec2 p) {
+                return fract(sin(dot(p, vec2(269.5, 183.3))) * 43758.5453);
+            }
+
+            float noise(vec2 p) {
+                vec2 i = floor(p);
+                vec2 f = fract(p);
+                f = f * f * (3.0 - 2.0 * f);
+                return mix(
+                    mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+                    mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x),
+                    f.y
+                );
+            }
+
             float fbm(vec2 p, int octaves) {
                 float value = 0.0;
-                float amplitude = 0.5;
-                float frequency = 1.0;
-
-                for (int i = 0; i < 8; i++) {
+                float amp = 0.5;
+                float freq = 1.0;
+                for (int i = 0; i < 6; i++) {
                     if (i >= octaves) break;
-                    value += amplitude * snoise(p * frequency);
-                    amplitude *= 0.5;
-                    frequency *= 2.0;
+                    value += amp * noise(p * freq);
+                    amp *= 0.5;
+                    freq *= 2.0;
                 }
-
                 return value;
             }
 
-            // Grass detail function
-            float grassDetail(vec2 p) {
-                return fbm(p * 20.0, 3) * 0.1;
-            }
-
             void main() {
-                // Correct aspect ratio
-                vec2 uv = v_uv;
-                uv.x *= u_resolution.x / u_resolution.y;
+                vec2 wp = v_worldPos.xz;
 
-                // Base terrain elevation
-                float elevation = fbm(uv * 2.0, 5) * 0.5 + 0.5;
+                vec3 grassDark = vec3(0.15, 0.35, 0.08);
+                vec3 grassMid = vec3(0.22, 0.48, 0.12);
+                vec3 grassLight = vec3(0.35, 0.58, 0.18);
+                vec3 grassYellow = vec3(0.55, 0.52, 0.20);
+                vec3 dirtBrown = vec3(0.42, 0.32, 0.18);
+                vec3 cloverLight = vec3(0.28, 0.45, 0.22);
 
-                float detail = grassDetail(uv);
-                elevation += detail;
+                float n1 = fbm(wp * 0.08 + vec2(10.0, 20.0), 4);
+                float n2 = fbm(wp * 0.15 + vec2(30.0, 50.0), 3);
+                float n3 = noise(wp * 0.4 + vec2(5.0, 15.0));
+                float microNoise = noise(wp * 2.0);
 
-                // Base green color for grass
-                vec3 lowGrass = vec3(0.2, 0.5, 0.1);
-                vec3 highGrass = vec3(0.45, 0.75, 0.15);
-                vec3 dirt = vec3(0.6, 0.5, 0.3);
-                vec3 flowers = vec3(0.9, 0.8, 0.2);
+                vec3 baseColor = mix(grassDark, grassMid, n1);
+                baseColor = mix(baseColor, grassLight, n2 * 0.6);
 
-                // Mix colors based on elevation and noise
-                vec3 grassColor = mix(lowGrass, highGrass, elevation);
+                float yellowPatches = smoothstep(0.55, 0.75, fbm(wp * 0.12 + vec2(100.0, 80.0), 3));
+                baseColor = mix(baseColor, grassYellow, yellowPatches * 0.35);
 
-                // Add some dirt patches
-                float dirtNoise = fbm(uv * 5.0, 3);
-                if (dirtNoise > 0.7 && elevation < 0.45) {
-                    grassColor = mix(grassColor, dirt, (dirtNoise - 0.7) * 3.0);
-                }
+                float dirtPatches = smoothstep(0.7, 0.85, fbm(wp * 0.06 + vec2(200.0, 150.0), 4));
+                baseColor = mix(baseColor, dirtBrown, dirtPatches * 0.25);
 
-                // Add some flowers
-                float flowerNoise = fbm(uv * 10.0, 2);
-                if (flowerNoise > 0.75 && elevation > 0.5) {
-                    grassColor = mix(grassColor, flowers, (flowerNoise - 0.75) * 4.0);
-                }
+                float clover = smoothstep(0.6, 0.7, noise(wp * 0.5 + vec2(300.0, 250.0)));
+                clover *= smoothstep(0.5, 0.6, noise(wp * 0.3 + vec2(350.0, 300.0)));
+                baseColor = mix(baseColor, cloverLight, clover * 0.3);
 
-                // Add shadows and highlights based on time
-                float shadow = fbm(uv * 3.0, 4) * 0.2;
-                grassColor -= shadow;
+                float grassBlades = noise(wp * 8.0) * 0.08;
+                baseColor += vec3(grassBlades * 0.5, grassBlades, grassBlades * 0.3);
 
-                // Apply a subtle vignette
-                float vignette = 1.0 - length(v_uv - 0.5) * 0.5;
-                grassColor *= vignette;
+                baseColor += (microNoise - 0.5) * 0.04;
 
-                gl_FragColor = vec4(grassColor, 1.0);
+                float ao = 0.92 + n3 * 0.08;
+                baseColor *= ao;
 
-                #ifdef PHYSICAL
-                  #include <colorspace_fragment>
-                #endif
+                float vignette = 1.0 - length(v_uv - 0.5) * 0.3;
+                baseColor *= vignette;
+
+                gl_FragColor = vec4(baseColor, 1.0);
             }
         `,
         side: THREE.DoubleSide,

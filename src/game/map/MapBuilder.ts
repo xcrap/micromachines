@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { createGround } from "./Ground";
-import { createTrack } from "./Track";
+import { createTrack, TRACK_WIDTH } from "./Track";
 import { createHills } from "./Hills";
 import { createTrees } from "./Trees";
 import { createRocks } from "./Rocks";
@@ -13,7 +13,8 @@ export interface GroundMeshWithHeight extends THREE.Mesh {
 export class MapBuilder {
     private scene: THREE.Scene;
     private trackPath: THREE.Shape;
-    private trackWidth = 10; // Increased track width
+    private trackWidth = TRACK_WIDTH;
+    private startPointIndex = 0;
     private terrainObjects: THREE.Object3D[] = [];
     private trackPoints: THREE.Vector2[] = [];
     private groundMesh: GroundMeshWithHeight | null = null;
@@ -90,7 +91,28 @@ export class MapBuilder {
 
     private addFinishLine(): void {
         if (!this.groundMesh || this.trackPoints.length === 0) return;
-        createFinishLine(this.scene, this.trackPoints, this.groundMesh);
+        createFinishLine(this.scene, this.trackPoints, this.groundMesh, this.getStartPointIndex());
+    }
+
+    private getStartPointIndex(): number {
+        if (this.trackPoints.length === 0) return 0;
+        return ((this.startPointIndex % this.trackPoints.length) + this.trackPoints.length) % this.trackPoints.length;
+    }
+
+    private getStartDirection2D(): THREE.Vector2 {
+        if (this.trackPoints.length < 2) {
+            return new THREE.Vector2(0, 1);
+        }
+
+        const pointCount = this.trackPoints.length;
+        const startIdx = this.getStartPointIndex();
+        const sampleOffset = 1;
+        const previousPoint = this.trackPoints[(startIdx - sampleOffset + pointCount) % pointCount];
+        const nextPoint = this.trackPoints[(startIdx + sampleOffset) % pointCount];
+
+        return new THREE.Vector2()
+            .subVectors(nextPoint, previousPoint)
+            .normalize();
     }
 
     public isPointOnTrack(x: number, z: number): boolean {
@@ -134,26 +156,20 @@ export class MapBuilder {
     }
 
     public getStartPosition(): THREE.Vector3 {
-        // Use the first track point
         if (this.trackPoints.length > 0 && this.groundMesh) {
-            const startPoint = this.trackPoints[0];
+            const startPoint = this.trackPoints[this.getStartPointIndex()];
             const height = this.groundMesh.getHeightAt(startPoint.x, startPoint.y) + 0.5;
             return new THREE.Vector3(startPoint.x, height, startPoint.y);
         }
-        return new THREE.Vector3(0, 0, -80); // Fallback to the first control point
+        return new THREE.Vector3(0, 0, -80);
     }
 
     public getStartDirection(): THREE.Vector3 {
-        // Use direction from first to second point
         if (this.trackPoints.length > 1) {
-            const firstPoint = this.trackPoints[0];
-            const secondPoint = this.trackPoints[1];
-            const direction = new THREE.Vector2()
-                .subVectors(secondPoint, firstPoint)
-                .normalize();
+            const direction = this.getStartDirection2D();
             return new THREE.Vector3(direction.x, 0, direction.y);
         }
-        return new THREE.Vector3(0, 0, 1); // Default forward direction
+        return new THREE.Vector3(0, 0, 1);
     }
 
     public getGroundMesh(): THREE.Mesh | null {

@@ -73,6 +73,9 @@ export class CarController {
         new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()
     ];
     private readonly _validGroundObjects: THREE.Object3D[] = [];
+    private readonly _worldWheelPositions: THREE.Vector3[] = [
+        new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()
+    ];
 
     constructor(
         scene: THREE.Scene,
@@ -346,17 +349,14 @@ export class CarController {
     }
 
     private checkGrounded(): boolean {
-        // Check if the car is on ground by casting rays from each wheel
         if (!this.groundMesh && !this.trackMesh) return true;
 
-        const minDistance = 0.5; // How far above ground to consider not grounded
+        const minDistance = 0.5;
         let lowestPoint = Infinity;
 
-        // Cast rays from each wheel position
-        for (const wheelPos of this.wheelPositions) {
-            const worldWheelPos = this.getWorldWheelPosition(wheelPos);
+        for (let i = 0; i < this.wheelPositions.length; i++) {
+            const worldWheelPos = this.getWorldWheelPosition(this.wheelPositions[i], i);
 
-            // Start ray from slightly above
             this.raycaster.set(
                 this._tmpVec3A.set(worldWheelPos.x, worldWheelPos.y + 2, worldWheelPos.z),
                 this._downVector
@@ -370,7 +370,6 @@ export class CarController {
             }
         }
 
-        // We're grounded if any wheel is close to the ground
         return lowestPoint < minDistance;
     }
 
@@ -437,23 +436,17 @@ export class CarController {
         };
     }
 
-    private getWorldWheelPosition(localPos: { x: number, y: number, z: number }): THREE.Vector3 {
-        // Convert a wheel's local position to world space
-        const wheelPos = new THREE.Vector3(localPos.x, localPos.y, localPos.z);
-        wheelPos.applyAxisAngle(new THREE.Vector3(0, 1, 0), this.carGroup.rotation.y);
+    private getWorldWheelPosition(localPos: { x: number, y: number, z: number }, index: number): THREE.Vector3 {
+        const wheelPos = this._worldWheelPositions[index];
+        wheelPos.set(localPos.x, localPos.y, localPos.z);
+        wheelPos.applyAxisAngle(this._tmpVec3D.set(0, 1, 0), this.carGroup.rotation.y);
         wheelPos.add(this.position);
         return wheelPos;
     }
 
     private applyTerrainPhysics(dt: number): void {
-        // Calculate world position for each wheel
-        const worldWheelPositions = this.wheelPositions.map(localPos => {
-            return this.getWorldWheelPosition(localPos);
-        });
-
-        // Do raycasts to find ground height at each wheel
         for (let i = 0; i < this.wheelPositions.length; i++) {
-            const wheelPos = worldWheelPositions[i];
+            const wheelPos = this.getWorldWheelPosition(this.wheelPositions[i], i);
 
             // Cast ray downward from wheel position
             this.raycaster.set(
@@ -532,7 +525,6 @@ export class CarController {
 
         // Apply car orientation based on suspension geometry
         if (this.wheelRayResults.length >= 3) {
-            // Calculate plane from three points
             const v1 = this._tmpVec3A.subVectors(
                 this.wheelRayResults[1], this.wheelRayResults[0]
             );
@@ -540,29 +532,18 @@ export class CarController {
                 this.wheelRayResults[2], this.wheelRayResults[0]
             );
 
-            // Calculate normal of the plane using cross product
             const normal = this._tmpVec3C.crossVectors(v1, v2).normalize();
 
-            // Only apply rotation if normal is mostly upward
             if (normal.y > 0.6) {
-                // Create quaternion to align with ground normal
                 const alignQuat = this._tmpQuatA.setFromUnitVectors(this._upVector, normal);
 
-                // Preserve car's steering direction (y-rotation)
-                const carYRotation = this.carGroup.rotation.y;
+                const currentYRotation = this.carGroup.rotation.y;
+                const yRotationQuat = this._tmpQuatB.setFromAxisAngle(this._upVector, currentYRotation);
 
-                // Apply orientation with smoothing
+                const targetQuat = alignQuat.clone().premultiply(yRotationQuat);
+
                 const smoothingFactor = 0.15;
-                const targetQuat = this._tmpQuatB.setFromEuler(
-                    new THREE.Euler(0, carYRotation, 0)
-                );
-                targetQuat.premultiply(alignQuat);
-
-                // Smoothly interpolate current rotation to target
                 this.carGroup.quaternion.slerp(targetQuat, smoothingFactor);
-
-                // Extract and ensure correct Y rotation for steering
-                this.carGroup.rotation.y = carYRotation;
             }
         }
     }

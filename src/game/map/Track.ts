@@ -1,23 +1,27 @@
 import * as THREE from 'three';
 
+export const TRACK_WIDTH = 10;
+export const TRACK_EDGE_BLEED = 3;
+
 export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[], groundMesh: THREE.Mesh) {
-    // Define control points for a dynamic rally track with smoother transitions.
     const controlPoints = [
-        new THREE.Vector3(0, 0, -80),
-        new THREE.Vector3(20, 0, -40),
-        new THREE.Vector3(40, 0, -20),
-        new THREE.Vector3(60, 0, 0),
-        new THREE.Vector3(40, 0, 20),
-        new THREE.Vector3(20, 0, 40),
-        new THREE.Vector3(0, 0, 60),
-        new THREE.Vector3(-20, 0, 40),
-        new THREE.Vector3(-40, 0, 20),
-        new THREE.Vector3(-60, 0, 0),
-        new THREE.Vector3(-40, 0, -20),
-        new THREE.Vector3(-20, 0, -40)
+        new THREE.Vector3(0, 0, -72),
+        new THREE.Vector3(18, 0, -72),
+        new THREE.Vector3(38, 0, -56),
+        new THREE.Vector3(52, 0, -34),
+        new THREE.Vector3(62, 0, -6),
+        new THREE.Vector3(58, 0, 20),
+        new THREE.Vector3(42, 0, 40),
+        new THREE.Vector3(18, 0, 56),
+        new THREE.Vector3(-8, 0, 60),
+        new THREE.Vector3(-32, 0, 52),
+        new THREE.Vector3(-52, 0, 34),
+        new THREE.Vector3(-62, 0, 8),
+        new THREE.Vector3(-56, 0, -22),
+        new THREE.Vector3(-40, 0, -48),
+        new THREE.Vector3(-18, 0, -72)
     ];
 
-    // Create a closed Catmull–Rom curve.
     const curve = new THREE.CatmullRomCurve3(controlPoints, true);
     curve.tension = 0.3;
 
@@ -26,8 +30,8 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
     const totalRows = divisions + overlap;
 
     // Track geometry parameters — extra bleed for organic edge blending
-    const trackWidth = 10;
-    const bleedWidth = 3.0;
+    const trackWidth = TRACK_WIDTH;
+    const bleedWidth = TRACK_EDGE_BLEED;
     const totalHalfW = trackWidth / 2 + bleedWidth;
     const vertices = [];
     const uvs = [];

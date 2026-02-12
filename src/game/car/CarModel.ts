@@ -308,7 +308,7 @@ export class CarModel {
         this.carBody.add(frontBumper);
 
         const rearBumperGeo = new THREE.BoxGeometry(0.88, 0.1, 0.06);
-        const rearBumper = new THREE.Mesh(rearBumperGeo, rearBumperGeo === frontBumperGeo ? bumperMat : bumperMat);
+        const rearBumper = new THREE.Mesh(rearBumperGeo, bumperMat);
         rearBumper.position.set(0, 0.22, -0.92);
         rearBumper.castShadow = true;
         this.carBody.add(rearBumper);
