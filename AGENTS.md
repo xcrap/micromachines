@@ -4,16 +4,14 @@
 
 - **Dev server:** `npm run dev`
 - **Build:** `npm run build`
-- **Lint:** `npm run lint`
 - **Typecheck:** `npx tsc --noEmit`
 
-Always run lint and typecheck after making changes.
+Always run typecheck after making changes.
 
 ## Tech Stack
 
 - React 19, TypeScript, Three.js
 - Vite, Tailwind CSS 4, PostCSS
-- ESLint with typescript-eslint
 
 ## Project Structure
 
