@@ -15,7 +15,8 @@
     "three": "^0.183.2"
   },
   "overrides": {
-    "minimatch": ">=9.0.0"
+    "minimatch": ">=9.0.0",
+    "picomatch": ">=4.0.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",
