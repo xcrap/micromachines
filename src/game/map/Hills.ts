@@ -20,8 +20,8 @@ function fbmNoise(x: number, y: number, z: number, octaves: number): number {
 }
 
 function createHillGeometry(radius: number, seed: number): THREE.BufferGeometry {
-    const widthSegments = 28;
-    const heightSegments = 14;
+    const widthSegments = 40;
+    const heightSegments = 20;
     const geometry = new THREE.SphereGeometry(radius, widthSegments, heightSegments, 0, Math.PI * 2, 0, Math.PI / 2);
 
     const posAttr = geometry.getAttribute('position');
@@ -193,8 +193,8 @@ export function createHills(
             hillGeometry.computeVertexNormals();
 
             const hillMesh = new THREE.Mesh(hillGeometry, sharedMaterial);
-            hillMesh.castShadow = true;
-            hillMesh.receiveShadow = true;
+            hillMesh.castShadow = false;
+            hillMesh.receiveShadow = false;
 
             hillGroup.position.set(x, baseHeight, z);
             hillGroup.scale.set(1, height, 1);

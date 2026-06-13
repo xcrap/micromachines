@@ -2,6 +2,7 @@ import * as THREE from 'three';
 
 export const TRACK_WIDTH = 10;
 export const TRACK_EDGE_BLEED = 3;
+export const TRACK_HEIGHT_OFFSET = 0.35;
 
 export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[], groundMesh: THREE.Mesh) {
     const controlPoints = [
@@ -42,7 +43,7 @@ export function createTrack(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
         getHeightAt: (x: number, z: number) => number
     }).getHeightAt;
 
-    const heightOffset = 0.35;
+    const heightOffset = TRACK_HEIGHT_OFFSET;
     const widthSegments = 6;
     const vertsPerRow = widthSegments + 1;
 

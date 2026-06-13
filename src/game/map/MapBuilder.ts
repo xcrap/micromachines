@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { createGround } from "./Ground";
-import { createTrack, TRACK_WIDTH } from "./Track";
+import { createTrack, TRACK_EDGE_BLEED, TRACK_HEIGHT_OFFSET, TRACK_WIDTH } from "./Track";
 import { createHills } from "./Hills";
 import { createTrees } from "./Trees";
 import { createRocks } from "./Rocks";
@@ -13,7 +13,7 @@ export interface GroundMeshWithHeight extends THREE.Mesh {
 export class MapBuilder {
     private scene: THREE.Scene;
     private trackPath: THREE.Shape;
-    private trackWidth = TRACK_WIDTH;
+    private readonly trackDrivableHalfWidth = TRACK_WIDTH / 2 + TRACK_EDGE_BLEED;
     private startPointIndex = 0;
     private terrainObjects: THREE.Object3D[] = [];
     private trackPoints: THREE.Vector2[] = [];
@@ -81,7 +81,7 @@ export class MapBuilder {
 
     private addTrees(): void {
         if (!this.groundMesh) return;
-        createTrees(this.scene, this.terrainObjects, this.isPointOnTrack.bind(this), this.groundMesh);
+        createTrees(this.scene, this.terrainObjects, this.isAreaClearOfTrack.bind(this), this.groundMesh);
     }
 
     private addRocks(): void {
@@ -91,7 +91,9 @@ export class MapBuilder {
 
     private addFinishLine(): void {
         if (!this.groundMesh || this.trackPoints.length === 0) return;
-        createFinishLine(this.scene, this.trackPoints, this.groundMesh, this.getStartPointIndex());
+        const finishLine = createFinishLine(this.scene, this.trackPoints, this.groundMesh, this.getStartPointIndex());
+        finishLine.userData.nonCollidable = true;
+        this.terrainObjects.push(finishLine);
     }
 
     private getStartPointIndex(): number {
@@ -116,9 +118,19 @@ export class MapBuilder {
     }
 
     public isPointOnTrack(x: number, z: number): boolean {
-        let minDistSq = Number.POSITIVE_INFINITY;
-        const threshold = this.trackWidth * 0.6;
+        const threshold = this.trackDrivableHalfWidth;
         const thresholdSq = threshold * threshold;
+
+        return this.getDistanceSqToTrack(x, z) <= thresholdSq;
+    }
+
+    public isAreaClearOfTrack(x: number, z: number, radius: number): boolean {
+        const threshold = this.trackDrivableHalfWidth + radius;
+        return this.getDistanceSqToTrack(x, z) > threshold * threshold;
+    }
+
+    private getDistanceSqToTrack(x: number, z: number): number {
+        let minDistSq = Number.POSITIVE_INFINITY;
 
         for (let i = 0; i < this.trackPoints.length; i++) {
             const current = this.trackPoints[i];
@@ -144,11 +156,10 @@ export class MapBuilder {
 
             if (distSq < minDistSq) {
                 minDistSq = distSq;
-                if (minDistSq <= thresholdSq) return true;
             }
         }
 
-        return minDistSq <= thresholdSq;
+        return minDistSq;
     }
 
     public getTerrainObjects(): THREE.Object3D[] {
@@ -184,6 +195,11 @@ export class MapBuilder {
         return 0;
     }
 
+    public getSurfaceHeightAt(x: number, z: number): number {
+        const groundHeight = this.getHeightAt(x, z);
+        return this.isPointOnTrack(x, z) ? groundHeight + TRACK_HEIGHT_OFFSET : groundHeight;
+    }
+
     public getTrackMesh(): THREE.Mesh | null {
         return this.trackMesh;
     }
@@ -209,19 +225,38 @@ export class MapBuilder {
     }
 
     public dispose(): void {
+        const geometries = new Set<THREE.BufferGeometry>();
+        const materials = new Set<THREE.Material>();
+        const textures = new Set<THREE.Texture>();
+
         for (const obj of this.terrainObjects) {
             this.scene.remove(obj);
             obj.traverse((child) => {
                 if (child instanceof THREE.Mesh) {
-                    child.geometry?.dispose();
+                    if (child.geometry) {
+                        geometries.add(child.geometry);
+                    }
                     if (Array.isArray(child.material)) {
-                        child.material.forEach((m) => m.dispose());
+                        child.material.forEach((m) => materials.add(m));
                     } else {
-                        child.material?.dispose();
+                        materials.add(child.material);
                     }
                 }
             });
         }
+
+        for (const material of materials) {
+            for (const value of Object.values(material)) {
+                if (value instanceof THREE.Texture) {
+                    textures.add(value);
+                }
+            }
+        }
+
+        geometries.forEach((geometry) => geometry.dispose());
+        textures.forEach((texture) => texture.dispose());
+        materials.forEach((material) => material.dispose());
+
         this.terrainObjects.length = 0;
         this.trackPoints.length = 0;
         this.groundMesh = null;

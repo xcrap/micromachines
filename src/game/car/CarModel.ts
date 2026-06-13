@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 export class CarModel {
     private carBody: THREE.Group;
-    private wheels: THREE.Mesh[] = [];
+    private wheels: THREE.Group[] = [];
     private carGroup: THREE.Group;
 
     constructor(carGroup: THREE.Group) {
@@ -10,6 +10,7 @@ export class CarModel {
         this.carBody = new THREE.Group();
         this.carGroup.add(this.carBody);
         this.createCarModel();
+        this.configureRenderFlags();
     }
 
     private createCarModel(): void {
@@ -431,7 +432,7 @@ export class CarModel {
             }
 
             this.carGroup.add(wheelGroup);
-            this.wheels.push(wheelGroup as unknown as THREE.Mesh);
+            this.wheels.push(wheelGroup);
         }
     }
 
@@ -439,5 +440,34 @@ export class CarModel {
         for (const wheel of this.wheels) {
             wheel.rotation.x += amount * 10;
         }
+    }
+
+    private configureRenderFlags(): void {
+        this.carGroup.traverse((child) => {
+            if (!(child instanceof THREE.Mesh)) return;
+            child.castShadow = false;
+            child.receiveShadow = false;
+        });
+    }
+
+    public dispose(): void {
+        const geometries = new Set<THREE.BufferGeometry>();
+        const materials = new Set<THREE.Material>();
+
+        this.carGroup.traverse((child) => {
+            if (!(child instanceof THREE.Mesh)) return;
+
+            geometries.add(child.geometry);
+
+            if (Array.isArray(child.material)) {
+                child.material.forEach((material) => materials.add(material));
+            } else {
+                materials.add(child.material);
+            }
+        });
+
+        geometries.forEach((geometry) => geometry.dispose());
+        materials.forEach((material) => material.dispose());
+        this.wheels.length = 0;
     }
 }

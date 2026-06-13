@@ -3,6 +3,7 @@ import * as THREE from 'three';
 interface TreeTemplate {
     trunkGeometry: THREE.CylinderGeometry;
     foliageTiers: { geometry: THREE.ConeGeometry; material: THREE.MeshStandardMaterial; yOffset: number }[];
+    footprintRadius: number;
 }
 
 function buildTemplates(): TreeTemplate[] {
@@ -48,7 +49,7 @@ function buildTemplates(): TreeTemplate[] {
             currentHeight *= cfg.heightShrink;
         }
 
-        templates.push({ trunkGeometry, foliageTiers });
+        templates.push({ trunkGeometry, foliageTiers, footprintRadius: cfg.baseRadius });
     }
 
     return templates;
@@ -73,12 +74,18 @@ function createTreeFromTemplate(template: TreeTemplate, trunkMaterial: THREE.Mes
     return tree;
 }
 
-export function createTrees(scene: THREE.Scene, terrainObjects: THREE.Object3D[], isPointOnTrack: (x: number, z: number) => boolean, groundMesh: THREE.Mesh): THREE.Group[] {
+export function createTrees(
+    scene: THREE.Scene,
+    terrainObjects: THREE.Object3D[],
+    isAreaClearOfTrack: (x: number, z: number, radius: number) => boolean,
+    groundMesh: THREE.Mesh
+): THREE.Group[] {
     const trees: THREE.Group[] = [];
-    const treeCount = 50;
+    const treeCount = 40;
     let treesCreated = 0;
     let attempts = 0;
-    const maxAttempts = 200;
+    const maxAttempts = 500;
+    const trackClearance = 4.5;
 
     const getHeightAt = (groundMesh as THREE.Mesh & {
         getHeightAt: (x: number, z: number) => number
@@ -93,10 +100,10 @@ export function createTrees(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
     const templates = buildTemplates();
 
     const scaleRanges = [
-        { min: 0.35, max: 0.55 },
-        { min: 0.6, max: 0.85 },
-        { min: 0.9, max: 1.2 },
-        { min: 1.3, max: 1.7 },
+        { min: 0.9, max: 1.15 },
+        { min: 1.15, max: 1.45 },
+        { min: 1.45, max: 1.8 },
+        { min: 1.8, max: 2.2 },
     ];
 
     while (treesCreated < treeCount && attempts < maxAttempts) {
@@ -105,19 +112,22 @@ export function createTrees(scene: THREE.Scene, terrainObjects: THREE.Object3D[]
         const x = Math.cos(angle) * distance;
         const z = Math.sin(angle) * distance;
 
-        if (!isPointOnTrack(x, z)) {
+        const templateIdx = Math.floor(Math.random() * templates.length);
+        const template = templates[templateIdx];
+        const sizeCategory = Math.floor(Math.random() * scaleRanges.length);
+        const range = scaleRanges[sizeCategory];
+        const baseScale = range.min + Math.random() * (range.max - range.min);
+        const scaleX = baseScale * (0.9 + Math.random() * 0.2);
+        const scaleY = baseScale * (0.9 + Math.random() * 0.2);
+        const scaleZ = baseScale * (0.9 + Math.random() * 0.2);
+        const footprintRadius = template.footprintRadius * Math.max(scaleX, scaleZ);
+
+        if (isAreaClearOfTrack(x, z, footprintRadius + trackClearance)) {
             const y = getHeightAt(x, z);
 
-            const templateIdx = Math.floor(Math.random() * templates.length);
-            const tree = createTreeFromTemplate(templates[templateIdx], trunkMaterial);
-
-            const sizeCategory = Math.floor(Math.random() * scaleRanges.length);
-            const range = scaleRanges[sizeCategory];
-            const baseScale = range.min + Math.random() * (range.max - range.min);
-            const scaleX = baseScale * (0.9 + Math.random() * 0.2);
-            const scaleY = baseScale * (0.85 + Math.random() * 0.3);
-            const scaleZ = baseScale * (0.9 + Math.random() * 0.2);
+            const tree = createTreeFromTemplate(template, trunkMaterial);
             tree.scale.set(scaleX, scaleY, scaleZ);
+            tree.userData.radius = footprintRadius + 0.75;
 
             tree.position.set(x, y, z);
             tree.rotation.y = Math.random() * Math.PI * 2;

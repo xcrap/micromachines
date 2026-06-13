@@ -21,6 +21,7 @@ const TRACK_COLOR = new THREE.Color(0x2a1a0a);
 const GRASS_COLOR = new THREE.Color(0x1a3a0a);
 const MAX_POINTS = 200;
 const MIN_DISTANCE = 0.03;
+const MIN_DISTANCE_SQ = MIN_DISTANCE * MIN_DISTANCE;
 const FADE_RATE = 0.08;
 
 class TrailRibbon {
@@ -77,8 +78,8 @@ class TrailRibbon {
         if (this.head >= this.maxPoints) return;
 
         if (this.hasLastPosition) {
-            const dist = position.distanceTo(this.lastPosition);
-            if (dist < MIN_DISTANCE) return;
+            const distSq = position.distanceToSquared(this.lastPosition);
+            if (distSq < MIN_DISTANCE_SQ) return;
         }
 
         this._tmpRight.set(-forward.z, 0, forward.x).normalize();
@@ -153,11 +154,12 @@ export class TrailSystem {
     private grassMaterial: THREE.ShaderMaterial;
     private raycaster = new THREE.Raycaster();
     private trackObjects: THREE.Object3D[] = [];
-    private clock = new THREE.Clock();
+    private trackSurfaceTest: ((x: number, z: number) => boolean) | null = null;
 
     private _tmpForward = new THREE.Vector3();
     private _tmpRayOrigin = new THREE.Vector3();
     private _downDir = new THREE.Vector3(0, -1, 0);
+    private _trackHits: THREE.Intersection[] = [];
 
     constructor(scene: THREE.Scene) {
         this.scene = scene;
@@ -189,6 +191,10 @@ export class TrailSystem {
         this.trackObjects = trackObjects;
     }
 
+    setTrackSurfaceTest(trackSurfaceTest: (x: number, z: number) => boolean): void {
+        this.trackSurfaceTest = trackSurfaceTest;
+    }
+
     addTrail(
         position: THREE.Vector3,
         rotation: number,
@@ -197,7 +203,9 @@ export class TrailSystem {
         width: number = 0.08,
         intensity: number = 0.5
     ): void {
-        const isOnTrack = this.isOnTrackSurface(position);
+        const isOnTrack = this.trackSurfaceTest
+            ? this.trackSurfaceTest(position.x, position.z)
+            : this.isOnTrackSurface(position);
         const material = isOnTrack ? this.trackMaterial : this.grassMaterial;
 
         let ribbon = this.activeRibbons.get(wheelId);
@@ -236,15 +244,13 @@ export class TrailSystem {
         }
     }
 
-    update(): void {
-        const dt = this.clock.getDelta();
-
+    update(deltaTime: number): void {
         for (const ribbon of this.activeRibbons.values()) {
-            ribbon.update(dt);
+            ribbon.update(deltaTime);
         }
 
         for (let i = this.fadingRibbons.length - 1; i >= 0; i--) {
-            const alive = this.fadingRibbons[i].update(dt);
+            const alive = this.fadingRibbons[i].update(deltaTime);
             if (!alive) {
                 this.scene.remove(this.fadingRibbons[i].mesh);
                 this.fadingRibbons[i].dispose();
@@ -266,6 +272,8 @@ export class TrailSystem {
         this.fadingRibbons.length = 0;
         this.trackMaterial.dispose();
         this.grassMaterial.dispose();
+        this.trackObjects.length = 0;
+        this.trackSurfaceTest = null;
     }
 
     private isOnTrackSurface(position: THREE.Vector3): boolean {
@@ -274,7 +282,9 @@ export class TrailSystem {
         this._tmpRayOrigin.set(position.x, position.y + 1, position.z);
         this.raycaster.set(this._tmpRayOrigin, this._downDir);
 
-        const intersects = this.raycaster.intersectObjects(this.trackObjects, true);
-        return intersects.length > 0;
+        this.raycaster.intersectObjects(this.trackObjects, true, this._trackHits);
+        const isOnTrack = this._trackHits.length > 0;
+        this._trackHits.length = 0;
+        return isOnTrack;
     }
 }

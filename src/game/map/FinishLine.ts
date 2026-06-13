@@ -79,10 +79,11 @@ export function createFinishLine(
     }
 
     const finishGeo = new THREE.PlaneGeometry(4, 1.5);
+    const finishTexture = createFinishTexture();
     const finishMat = new THREE.MeshStandardMaterial({
-        color: 0xffffff,
-        roughness: 0.4,
-        metalness: 0.2,
+        map: finishTexture,
+        roughness: 0.35,
+        metalness: 0.15,
         side: THREE.DoubleSide,
     });
     const finishSign = new THREE.Mesh(finishGeo, finishMat);
@@ -170,5 +171,49 @@ function createCheckeredTexture(): THREE.Texture {
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
     texture.repeat.set(4, 1);
+    return texture;
+}
+
+function createFinishTexture(): THREE.Texture {
+    const width = 512;
+    const height = 192;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d')!;
+
+    const gradient = ctx.createLinearGradient(0, 0, width, height);
+    gradient.addColorStop(0, '#fff7e0');
+    gradient.addColorStop(1, '#f0d4a0');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.fillStyle = '#cf1020';
+    ctx.fillRect(0, 0, width, 26);
+    ctx.fillRect(0, height - 26, width, 26);
+
+    const square = 24;
+    for (let x = 0; x < width; x += square) {
+        for (let y = 26; y < height - 26; y += square) {
+            ctx.fillStyle = ((x / square + y / square) % 2) === 0 ? '#111111' : '#ffffff';
+            ctx.globalAlpha = 0.18;
+            ctx.fillRect(x, y, square, square);
+        }
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = '#111111';
+    ctx.font = 'bold 72px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('FINISH', width / 2, height / 2 + 4);
+
+    ctx.strokeStyle = '#cf1020';
+    ctx.lineWidth = 8;
+    ctx.strokeRect(8, 8, width - 16, height - 16);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.anisotropy = 4;
     return texture;
 }
