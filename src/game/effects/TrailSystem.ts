@@ -1,290 +1,276 @@
-import * as THREE from 'three';
+import * as THREE from "three";
 
-const TRAIL_VERTEX_SHADER = `
-attribute float alpha;
+const VERTEX_SHADER = /* glsl */ `
+attribute float aAlpha;
+attribute vec3 aColor;
+
 varying float vAlpha;
+varying vec3 vColor;
+
 void main() {
-    vAlpha = alpha;
+    vAlpha = aAlpha;
+    vColor = aColor;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `;
 
-const TRAIL_FRAGMENT_SHADER = `
-uniform vec3 color;
+const FRAGMENT_SHADER = /* glsl */ `
+precision mediump float;
+
 varying float vAlpha;
+varying vec3 vColor;
+
 void main() {
-    gl_FragColor = vec4(color, vAlpha);
+    if (vAlpha < 0.004) discard;
+    gl_FragColor = vec4(vColor, vAlpha);
+    // Without this the marks bypass output colour management and wash out to grey.
+    #include <colorspace_fragment>
 }
 `;
 
-const TRACK_COLOR = new THREE.Color(0x2a1a0a);
-const GRASS_COLOR = new THREE.Color(0x1a3a0a);
-const MAX_POINTS = 200;
-const MIN_DISTANCE = 0.03;
-const MIN_DISTANCE_SQ = MIN_DISTANCE * MIN_DISTANCE;
-const FADE_RATE = 0.08;
+const CAPACITY = 640;
+/** How many of the oldest points get recycled when a ribbon fills up. */
+const RECYCLE_BLOCK = 160;
+const MIN_STEP = 0.06;
+const MIN_STEP_SQ = MIN_STEP * MIN_STEP;
+const FADE_RATE = 0.055;
 
+const TRACK_COLOR = new THREE.Color(0x2b1d0e);
+const GRASS_COLOR = new THREE.Color(0x3b3218);
+
+/**
+ * One continuous ribbon per wheel, backed by a sliding buffer so the whole skid
+ * history is a single draw call instead of a mesh per streak.
+ */
 class TrailRibbon {
-    private maxPoints = MAX_POINTS;
-    private positions: Float32Array;
-    private alphas: Float32Array;
-    private head = 0;
-    private count = 0;
     readonly mesh: THREE.Mesh;
-    private geometry: THREE.BufferGeometry;
-    private lastPosition = new THREE.Vector3();
-    private hasLastPosition = false;
-    private posAttr: THREE.BufferAttribute;
-    private alphaAttr: THREE.BufferAttribute;
 
-    private _tmpRight = new THREE.Vector3();
+    private readonly positions = new Float32Array(CAPACITY * 2 * 3);
+    private readonly colors = new Float32Array(CAPACITY * 2 * 3);
+    private readonly alphas = new Float32Array(CAPACITY * 2);
+
+    private readonly geometry: THREE.BufferGeometry;
+    private readonly positionAttribute: THREE.BufferAttribute;
+    private readonly colorAttribute: THREE.BufferAttribute;
+    private readonly alphaAttribute: THREE.BufferAttribute;
+
+    private count = 0;
+    private pendingBreak = true;
+    private readonly lastPosition = new THREE.Vector3();
+    private hasLast = false;
 
     constructor(material: THREE.ShaderMaterial) {
-        const vertexCount = this.maxPoints * 2;
-        this.positions = new Float32Array(vertexCount * 3);
-        this.alphas = new Float32Array(vertexCount);
-
         this.geometry = new THREE.BufferGeometry();
-        this.posAttr = new THREE.BufferAttribute(this.positions, 3);
-        this.posAttr.setUsage(THREE.DynamicDrawUsage);
-        this.alphaAttr = new THREE.BufferAttribute(this.alphas, 1);
-        this.alphaAttr.setUsage(THREE.DynamicDrawUsage);
 
-        this.geometry.setAttribute('position', this.posAttr);
-        this.geometry.setAttribute('alpha', this.alphaAttr);
+        this.positionAttribute = new THREE.BufferAttribute(this.positions, 3);
+        this.positionAttribute.setUsage(THREE.DynamicDrawUsage);
+        this.colorAttribute = new THREE.BufferAttribute(this.colors, 3);
+        this.colorAttribute.setUsage(THREE.DynamicDrawUsage);
+        this.alphaAttribute = new THREE.BufferAttribute(this.alphas, 1);
+        this.alphaAttribute.setUsage(THREE.DynamicDrawUsage);
 
-        const indices = new Uint16Array((this.maxPoints - 1) * 6);
-        for (let i = 0; i < this.maxPoints - 1; i++) {
-            const ci = i * 2;
-            const ni = (i + 1) * 2;
+        this.geometry.setAttribute("position", this.positionAttribute);
+        this.geometry.setAttribute("aColor", this.colorAttribute);
+        this.geometry.setAttribute("aAlpha", this.alphaAttribute);
+
+        const indices = new Uint16Array((CAPACITY - 1) * 6);
+        for (let i = 0; i < CAPACITY - 1; i++) {
+            const current = i * 2;
+            const next = (i + 1) * 2;
             const base = i * 6;
-            indices[base] = ci;
-            indices[base + 1] = ci + 1;
-            indices[base + 2] = ni;
-            indices[base + 3] = ni;
-            indices[base + 4] = ci + 1;
-            indices[base + 5] = ni + 1;
+            indices[base] = current;
+            indices[base + 1] = current + 1;
+            indices[base + 2] = next;
+            indices[base + 3] = next;
+            indices[base + 4] = current + 1;
+            indices[base + 5] = next + 1;
         }
         this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
         this.geometry.setDrawRange(0, 0);
+        this.geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e4);
 
         this.mesh = new THREE.Mesh(this.geometry, material);
         this.mesh.frustumCulled = false;
-        this.mesh.renderOrder = 999;
-        this.mesh.position.y = 0.05;
+        this.mesh.renderOrder = 4;
+        this.mesh.matrixAutoUpdate = false;
+        this.mesh.userData.nonCollidable = true;
     }
 
-    addPoint(position: THREE.Vector3, forward: THREE.Vector3, width: number): void {
-        if (this.head >= this.maxPoints) return;
+    public breakTrail(): void {
+        this.pendingBreak = true;
+        this.hasLast = false;
+    }
 
-        if (this.hasLastPosition) {
-            const distSq = position.distanceToSquared(this.lastPosition);
-            if (distSq < MIN_DISTANCE_SQ) return;
+    public addPoint(
+        position: THREE.Vector3,
+        rightX: number,
+        rightZ: number,
+        halfWidth: number,
+        color: THREE.Color,
+        alpha: number,
+    ): void {
+        if (this.hasLast && position.distanceToSquared(this.lastPosition) < MIN_STEP_SQ) return;
+
+        if (this.count >= CAPACITY) this.recycle();
+
+        // A zero-alpha seam stops a resumed skid from being joined to the previous one.
+        if (this.pendingBreak) {
+            this.writePoint(position, rightX, rightZ, halfWidth, color, 0);
+            this.pendingBreak = false;
+            if (this.count >= CAPACITY) this.recycle();
         }
 
-        this._tmpRight.set(-forward.z, 0, forward.x).normalize();
-
-        const halfW = width * 0.5;
-        const idx = this.head * 2;
-
-        const lx = position.x - this._tmpRight.x * halfW;
-        const lz = position.z - this._tmpRight.z * halfW;
-        const rx = position.x + this._tmpRight.x * halfW;
-        const rz = position.z + this._tmpRight.z * halfW;
-
-        this.positions[idx * 3] = lx;
-        this.positions[idx * 3 + 1] = position.y;
-        this.positions[idx * 3 + 2] = lz;
-
-        this.positions[(idx + 1) * 3] = rx;
-        this.positions[(idx + 1) * 3 + 1] = position.y;
-        this.positions[(idx + 1) * 3 + 2] = rz;
-
-        this.alphas[idx] = 0.65;
-        this.alphas[idx + 1] = 0.65;
-
-        this.head++;
-        if (this.count < this.head) this.count = this.head;
-
+        this.writePoint(position, rightX, rightZ, halfWidth, color, alpha);
         this.lastPosition.copy(position);
-        this.hasLastPosition = true;
-
-        this.updateDrawRange();
-        this.posAttr.needsUpdate = true;
-        this.alphaAttr.needsUpdate = true;
+        this.hasLast = true;
     }
 
-    update(deltaTime: number): boolean {
-        if (this.count === 0) return false;
+    private writePoint(
+        position: THREE.Vector3,
+        rightX: number,
+        rightZ: number,
+        halfWidth: number,
+        color: THREE.Color,
+        alpha: number,
+    ): void {
+        const index = this.count * 2;
+        const left = index * 3;
+        const right = (index + 1) * 3;
 
-        let anyVisible = false;
-        for (let i = 0; i < this.count * 2; i++) {
+        this.positions[left] = position.x - rightX * halfWidth;
+        this.positions[left + 1] = position.y;
+        this.positions[left + 2] = position.z - rightZ * halfWidth;
+
+        this.positions[right] = position.x + rightX * halfWidth;
+        this.positions[right + 1] = position.y;
+        this.positions[right + 2] = position.z + rightZ * halfWidth;
+
+        this.colors[left] = color.r;
+        this.colors[left + 1] = color.g;
+        this.colors[left + 2] = color.b;
+        this.colors[right] = color.r;
+        this.colors[right + 1] = color.g;
+        this.colors[right + 2] = color.b;
+
+        this.alphas[index] = alpha;
+        this.alphas[index + 1] = alpha;
+
+        this.count++;
+    }
+
+    private recycle(): void {
+        const keep = CAPACITY - RECYCLE_BLOCK;
+        this.positions.copyWithin(0, RECYCLE_BLOCK * 2 * 3, CAPACITY * 2 * 3);
+        this.colors.copyWithin(0, RECYCLE_BLOCK * 2 * 3, CAPACITY * 2 * 3);
+        this.alphas.copyWithin(0, RECYCLE_BLOCK * 2, CAPACITY * 2);
+        this.count = keep;
+    }
+
+    public update(deltaTime: number): void {
+        if (this.count === 0) return;
+
+        const fade = FADE_RATE * deltaTime;
+        const vertexCount = this.count * 2;
+
+        for (let i = 0; i < vertexCount; i++) {
             if (this.alphas[i] > 0) {
-                this.alphas[i] = Math.max(0, this.alphas[i] - FADE_RATE * deltaTime);
-                if (this.alphas[i] > 0.001) anyVisible = true;
+                this.alphas[i] = Math.max(0, this.alphas[i] - fade);
             }
         }
 
-        this.alphaAttr.needsUpdate = true;
-        return anyVisible;
+        this.geometry.setDrawRange(0, Math.max(0, (this.count - 1) * 6));
+        this.positionAttribute.needsUpdate = true;
+        this.colorAttribute.needsUpdate = true;
+        this.alphaAttribute.needsUpdate = true;
     }
 
-    isFull(): boolean {
-        return this.head >= this.maxPoints;
+    public clear(): void {
+        this.count = 0;
+        this.pendingBreak = true;
+        this.hasLast = false;
+        this.alphas.fill(0);
+        this.geometry.setDrawRange(0, 0);
     }
 
-    private updateDrawRange(): void {
-        if (this.count < 2) {
-            this.geometry.setDrawRange(0, 0);
-            return;
-        }
-        this.geometry.setDrawRange(0, (this.count - 1) * 6);
-    }
-
-    dispose(): void {
+    public dispose(): void {
         this.geometry.dispose();
     }
 }
 
 export class TrailSystem {
-    private scene: THREE.Scene;
-    private activeRibbons = new Map<string, TrailRibbon>();
-    private fadingRibbons: TrailRibbon[] = [];
-    private trackMaterial: THREE.ShaderMaterial;
-    private grassMaterial: THREE.ShaderMaterial;
-    private raycaster = new THREE.Raycaster();
-    private trackObjects: THREE.Object3D[] = [];
-    private trackSurfaceTest: ((x: number, z: number) => boolean) | null = null;
-
-    private _tmpForward = new THREE.Vector3();
-    private _tmpRayOrigin = new THREE.Vector3();
-    private _downDir = new THREE.Vector3(0, -1, 0);
-    private _trackHits: THREE.Intersection[] = [];
+    private readonly material: THREE.ShaderMaterial;
+    private readonly ribbons = new Map<string, TrailRibbon>();
+    private readonly scene: THREE.Scene;
+    private readonly color = new THREE.Color();
 
     constructor(scene: THREE.Scene) {
         this.scene = scene;
-
-        this.trackMaterial = new THREE.ShaderMaterial({
-            uniforms: { color: { value: TRACK_COLOR } },
-            vertexShader: TRAIL_VERTEX_SHADER,
-            fragmentShader: TRAIL_FRAGMENT_SHADER,
+        this.material = new THREE.ShaderMaterial({
+            uniforms: {},
+            vertexShader: VERTEX_SHADER,
+            fragmentShader: FRAGMENT_SHADER,
             transparent: true,
             depthWrite: false,
             depthTest: true,
             side: THREE.DoubleSide,
-            blending: THREE.NormalBlending,
-        });
-
-        this.grassMaterial = new THREE.ShaderMaterial({
-            uniforms: { color: { value: GRASS_COLOR } },
-            vertexShader: TRAIL_VERTEX_SHADER,
-            fragmentShader: TRAIL_FRAGMENT_SHADER,
-            transparent: true,
-            depthWrite: false,
-            depthTest: true,
-            side: THREE.DoubleSide,
-            blending: THREE.NormalBlending,
+            polygonOffset: true,
+            polygonOffsetFactor: -6,
+            polygonOffsetUnits: -6,
         });
     }
 
-    setTrackObjects(trackObjects: THREE.Object3D[]): void {
-        this.trackObjects = trackObjects;
-    }
-
-    setTrackSurfaceTest(trackSurfaceTest: (x: number, z: number) => boolean): void {
-        this.trackSurfaceTest = trackSurfaceTest;
-    }
-
-    addTrail(
-        position: THREE.Vector3,
-        rotation: number,
-        _color?: THREE.Color,
-        wheelId: string = 'default',
-        width: number = 0.08,
-        intensity: number = 0.5
-    ): void {
-        const isOnTrack = this.trackSurfaceTest
-            ? this.trackSurfaceTest(position.x, position.z)
-            : this.isOnTrackSurface(position);
-        const material = isOnTrack ? this.trackMaterial : this.grassMaterial;
-
-        let ribbon = this.activeRibbons.get(wheelId);
-
-        if (ribbon && (ribbon.mesh.material !== material || ribbon.isFull())) {
-            this.retireRibbon(wheelId);
-            ribbon = undefined;
-        }
-
+    private ribbon(wheelId: string): TrailRibbon {
+        let ribbon = this.ribbons.get(wheelId);
         if (!ribbon) {
-            ribbon = new TrailRibbon(material);
+            ribbon = new TrailRibbon(this.material);
             this.scene.add(ribbon.mesh);
-            this.activeRibbons.set(wheelId, ribbon);
+            this.ribbons.set(wheelId, ribbon);
         }
-
-        this._tmpForward.set(Math.sin(rotation), 0, Math.cos(rotation));
-
-        const driftWidth = THREE.MathUtils.lerp(0.06, 0.18, THREE.MathUtils.clamp(intensity, 0, 1));
-        const finalWidth = Math.max(width, driftWidth);
-
-        ribbon.addPoint(position, this._tmpForward, finalWidth);
+        return ribbon;
     }
 
-    breakAllTrails(): void {
-        const wheelIds = [...this.activeRibbons.keys()];
-        for (const wheelId of wheelIds) {
-            this.retireRibbon(wheelId);
-        }
+    public addMark(
+        wheelId: string,
+        position: THREE.Vector3,
+        headingSin: number,
+        headingCos: number,
+        onTrack: boolean,
+        intensity: number,
+    ): void {
+        // Ribbon runs perpendicular to travel.
+        const rightX = -headingCos;
+        const rightZ = headingSin;
+
+        const clamped = THREE.MathUtils.clamp(intensity, 0, 1);
+        const halfWidth = THREE.MathUtils.lerp(0.06, 0.13, clamped);
+
+        this.color.copy(onTrack ? TRACK_COLOR : GRASS_COLOR);
+        // Grass only gets flattened, so those marks stay far fainter than rubber on dirt.
+        const alpha = onTrack
+            ? THREE.MathUtils.lerp(0.22, 0.62, clamped)
+            : THREE.MathUtils.lerp(0.10, 0.28, clamped);
+
+        this.ribbon(wheelId).addPoint(position, rightX, rightZ, halfWidth, this.color, alpha);
     }
 
-    private retireRibbon(wheelId: string): void {
-        const ribbon = this.activeRibbons.get(wheelId);
-        if (ribbon) {
-            this.fadingRibbons.push(ribbon);
-            this.activeRibbons.delete(wheelId);
-        }
+    public breakAllTrails(): void {
+        for (const ribbon of this.ribbons.values()) ribbon.breakTrail();
     }
 
-    update(deltaTime: number): void {
-        for (const ribbon of this.activeRibbons.values()) {
-            ribbon.update(deltaTime);
-        }
-
-        for (let i = this.fadingRibbons.length - 1; i >= 0; i--) {
-            const alive = this.fadingRibbons[i].update(deltaTime);
-            if (!alive) {
-                this.scene.remove(this.fadingRibbons[i].mesh);
-                this.fadingRibbons[i].dispose();
-                this.fadingRibbons.splice(i, 1);
-            }
-        }
+    public clear(): void {
+        for (const ribbon of this.ribbons.values()) ribbon.clear();
     }
 
-    dispose(): void {
-        for (const ribbon of this.activeRibbons.values()) {
+    public update(deltaTime: number): void {
+        for (const ribbon of this.ribbons.values()) ribbon.update(deltaTime);
+    }
+
+    public dispose(): void {
+        for (const ribbon of this.ribbons.values()) {
             this.scene.remove(ribbon.mesh);
             ribbon.dispose();
         }
-        this.activeRibbons.clear();
-        for (const ribbon of this.fadingRibbons) {
-            this.scene.remove(ribbon.mesh);
-            ribbon.dispose();
-        }
-        this.fadingRibbons.length = 0;
-        this.trackMaterial.dispose();
-        this.grassMaterial.dispose();
-        this.trackObjects.length = 0;
-        this.trackSurfaceTest = null;
-    }
-
-    private isOnTrackSurface(position: THREE.Vector3): boolean {
-        if (this.trackObjects.length === 0) return true;
-
-        this._tmpRayOrigin.set(position.x, position.y + 1, position.z);
-        this.raycaster.set(this._tmpRayOrigin, this._downDir);
-
-        this.raycaster.intersectObjects(this.trackObjects, true, this._trackHits);
-        const isOnTrack = this._trackHits.length > 0;
-        this._trackHits.length = 0;
-        return isOnTrack;
+        this.ribbons.clear();
+        this.material.dispose();
     }
 }

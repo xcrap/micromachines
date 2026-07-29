@@ -1,267 +1,177 @@
 import * as THREE from "three";
+import { TRACK_SURFACE_OFFSET, TRACK_WIDTH, type QualityTier } from "../core/Config";
+import { updateWind } from "../core/Wind";
+import { TrackPath, type TrackQuery } from "./TrackPath";
+import { Terrain, baseTerrainHeight } from "./Terrain";
 import { createGround } from "./Ground";
-import { createTrack, TRACK_EDGE_BLEED, TRACK_HEIGHT_OFFSET, TRACK_WIDTH } from "./Track";
-import { createHills } from "./Hills";
+import { createTrack } from "./Track";
 import { createTrees } from "./Trees";
 import { createRocks } from "./Rocks";
-import { createFinishLine } from "./FinishLine";
+import { createProps } from "./Props";
+import { createFinishLine, type FinishLineResult } from "./FinishLine";
+import { createSky } from "./Sky";
+import type { Obstacle } from "./Scatter";
 
-export interface GroundMeshWithHeight extends THREE.Mesh {
-    getHeightAt(x: number, z: number): number;
-}
+const DRIVABLE_HALF_WIDTH = TRACK_WIDTH / 2 + 1.2;
+const OBSTACLE_CELL_SIZE = 8;
 
 export class MapBuilder {
-    private scene: THREE.Scene;
-    private trackPath: THREE.Shape;
-    private readonly trackDrivableHalfWidth = TRACK_WIDTH / 2 + TRACK_EDGE_BLEED;
-    private startPointIndex = 0;
-    private terrainObjects: THREE.Object3D[] = [];
-    private trackPoints: THREE.Vector2[] = [];
-    private groundMesh: GroundMeshWithHeight | null = null;
-    private trackMesh: THREE.Mesh | null = null;
-    private groundResize: ((width: number, height: number) => void) | null = null;
-    private trackResize: ((width: number, height: number) => void) | null = null;
+    private readonly scene: THREE.Scene;
+    private readonly quality: QualityTier;
 
-    constructor(scene: THREE.Scene) {
+    private readonly trackPath: TrackPath;
+    private readonly terrain: Terrain;
+
+    private readonly disposables: { dispose(): void }[] = [];
+    private readonly roots: THREE.Object3D[] = [];
+    private readonly obstacles: Obstacle[] = [];
+    private readonly obstacleCells = new Map<number, Obstacle[]>();
+
+    private sky: ReturnType<typeof createSky> | null = null;
+    private finishLine: FinishLineResult | null = null;
+
+    private readonly _surfaceSample = { height: 0, trackDistance: 0 };
+
+    constructor(scene: THREE.Scene, quality: QualityTier) {
         this.scene = scene;
-        this.trackPath = new THREE.Shape();
-        this.initializeTrackPath();
-    }
-
-    private initializeTrackPath(): void {
-        // Create a larger track with smoother curves and a better start/finish line approach
-        this.trackPath.moveTo(0, 0);
-
-        // Adjust the first curve to create a straighter approach to start/finish line
-        this.trackPath.bezierCurveTo(
-            20,
-            0, // First control point - straighter approach
-            40,
-            -10, // Second control point
-            40,
-            -40, // End point
-        );
-        this.trackPath.bezierCurveTo(40, -60, 20, -70, 0, -60);
-        this.trackPath.bezierCurveTo(-20, -50, -40, -20, -40, 0);
-        this.trackPath.bezierCurveTo(-40, 20, -20, 40, 0, 40);
-        this.trackPath.bezierCurveTo(20, 40, 20, 20, 0, 0); // Smoother approach to finish
+        this.quality = quality;
+        this.trackPath = new TrackPath(baseTerrainHeight);
+        this.terrain = new Terrain(this.trackPath);
     }
 
     public buildMap(): void {
-        this.createGround();
-        this.createTrack();
-        this.addDecorations();
+        this.sky = createSky();
+        this.add(this.sky.mesh, this.sky);
+
+        const ground = createGround(this.terrain, this.quality.groundSegments);
+        this.add(ground.mesh, ground);
+
+        const track = createTrack(this.trackPath, this.terrain);
+        this.add(track.roadMesh, track);
+        if (track.kerbMesh) this.roots.push(this.attach(track.kerbMesh));
+
+        this.finishLine = createFinishLine(this.trackPath, this.terrain);
+        this.add(this.finishLine.group, this.finishLine);
+        this.registerObstacles(this.finishLine.obstacles);
+
+        const trees = createTrees(this.terrain, this.quality.treeCount);
+        trees.meshes.forEach((mesh) => this.roots.push(this.attach(mesh)));
+        this.disposables.push(trees);
+        this.registerObstacles(trees.obstacles);
+
+        const rocks = createRocks(this.terrain, this.quality.rockCount);
+        rocks.meshes.forEach((mesh) => this.roots.push(this.attach(mesh)));
+        this.disposables.push(rocks);
+        this.registerObstacles(rocks.obstacles);
+
+        const props = createProps(this.trackPath, this.terrain);
+        props.meshes.forEach((mesh) => this.roots.push(this.attach(mesh)));
+        this.disposables.push(props);
+        this.registerObstacles(props.obstacles);
     }
 
-    private createGround(): void {
-        const { mesh, onResize } = createGround(this.scene, this.terrainObjects);
-        this.groundMesh = mesh as GroundMeshWithHeight;
-        this.groundResize = onResize;
+    private add(object: THREE.Object3D, disposable: { dispose(): void }): void {
+        this.roots.push(this.attach(object));
+        this.disposables.push(disposable);
     }
 
-    private createTrack(): void {
-        if (!this.groundMesh) return;
-        const { trackPoints, trackMesh, onResize } = createTrack(this.scene, this.terrainObjects, this.groundMesh);
-        this.trackPoints = trackPoints;
-        this.trackMesh = trackMesh;
-        this.trackResize = onResize;
+    private attach(object: THREE.Object3D): THREE.Object3D {
+        this.scene.add(object);
+        return object;
     }
 
-    private createHills(): void {
-        if (!this.groundMesh) return;
-        createHills(this.scene, this.terrainObjects, this.isPointOnTrack.bind(this), this.groundMesh);
-    }
+    private registerObstacles(obstacles: readonly Obstacle[]): void {
+        for (const obstacle of obstacles) {
+            this.obstacles.push(obstacle);
 
-    private addDecorations(): void {
-        this.addFinishLine();
-        this.addTrees();
-        this.addRocks();
-        this.createHills();
-    }
+            const cx = Math.floor(obstacle.x / OBSTACLE_CELL_SIZE);
+            const cz = Math.floor(obstacle.z / OBSTACLE_CELL_SIZE);
+            const key = (cx + 2048) * 4096 + (cz + 2048);
+            const bucket = this.obstacleCells.get(key);
 
-    private addTrees(): void {
-        if (!this.groundMesh) return;
-        createTrees(this.scene, this.terrainObjects, this.isAreaClearOfTrack.bind(this), this.groundMesh);
-    }
-
-    private addRocks(): void {
-        if (!this.groundMesh) return;
-        createRocks(this.scene, this.terrainObjects, this.isPointOnTrack.bind(this), this.groundMesh);
-    }
-
-    private addFinishLine(): void {
-        if (!this.groundMesh || this.trackPoints.length === 0) return;
-        const finishLine = createFinishLine(this.scene, this.trackPoints, this.groundMesh, this.getStartPointIndex());
-        finishLine.userData.nonCollidable = true;
-        this.terrainObjects.push(finishLine);
-    }
-
-    private getStartPointIndex(): number {
-        if (this.trackPoints.length === 0) return 0;
-        return ((this.startPointIndex % this.trackPoints.length) + this.trackPoints.length) % this.trackPoints.length;
-    }
-
-    private getStartDirection2D(): THREE.Vector2 {
-        if (this.trackPoints.length < 2) {
-            return new THREE.Vector2(0, 1);
-        }
-
-        const pointCount = this.trackPoints.length;
-        const startIdx = this.getStartPointIndex();
-        const sampleOffset = 1;
-        const previousPoint = this.trackPoints[(startIdx - sampleOffset + pointCount) % pointCount];
-        const nextPoint = this.trackPoints[(startIdx + sampleOffset) % pointCount];
-
-        return new THREE.Vector2()
-            .subVectors(nextPoint, previousPoint)
-            .normalize();
-    }
-
-    public isPointOnTrack(x: number, z: number): boolean {
-        const threshold = this.trackDrivableHalfWidth;
-        const thresholdSq = threshold * threshold;
-
-        return this.getDistanceSqToTrack(x, z) <= thresholdSq;
-    }
-
-    public isAreaClearOfTrack(x: number, z: number, radius: number): boolean {
-        const threshold = this.trackDrivableHalfWidth + radius;
-        return this.getDistanceSqToTrack(x, z) > threshold * threshold;
-    }
-
-    private getDistanceSqToTrack(x: number, z: number): number {
-        let minDistSq = Number.POSITIVE_INFINITY;
-
-        for (let i = 0; i < this.trackPoints.length; i++) {
-            const current = this.trackPoints[i];
-            const next = this.trackPoints[(i + 1) % this.trackPoints.length];
-
-            // Point-to-segment distance using pure math (no allocations)
-            const dx = next.x - current.x;
-            const dz = next.y - current.y;
-            const lenSq = dx * dx + dz * dz;
-
-            let t = 0;
-            if (lenSq > 0) {
-                t = ((x - current.x) * dx + (z - current.y) * dz) / lenSq;
-                if (t < 0) t = 0;
-                else if (t > 1) t = 1;
-            }
-
-            const closestX = current.x + t * dx;
-            const closestZ = current.y + t * dz;
-            const ex = x - closestX;
-            const ez = z - closestZ;
-            const distSq = ex * ex + ez * ez;
-
-            if (distSq < minDistSq) {
-                minDistSq = distSq;
+            if (bucket) {
+                bucket.push(obstacle);
+            } else {
+                this.obstacleCells.set(key, [obstacle]);
             }
         }
-
-        return minDistSq;
     }
 
-    public getTerrainObjects(): THREE.Object3D[] {
-        return this.terrainObjects;
-    }
+    /** Visits every obstacle whose cell overlaps the query disc. Hot path — no allocations. */
+    public forEachObstacleNear(x: number, z: number, radius: number, visit: (obstacle: Obstacle) => void): void {
+        const reach = Math.ceil((radius + OBSTACLE_CELL_SIZE) / OBSTACLE_CELL_SIZE);
+        const cx = Math.floor(x / OBSTACLE_CELL_SIZE);
+        const cz = Math.floor(z / OBSTACLE_CELL_SIZE);
 
-    public getStartPosition(): THREE.Vector3 {
-        if (this.trackPoints.length > 0 && this.groundMesh) {
-            const startPoint = this.trackPoints[this.getStartPointIndex()];
-            const height = this.groundMesh.getHeightAt(startPoint.x, startPoint.y) + 0.5;
-            return new THREE.Vector3(startPoint.x, height, startPoint.y);
+        for (let dz = -reach; dz <= reach; dz++) {
+            for (let dx = -reach; dx <= reach; dx++) {
+                const key = (cx + dx + 2048) * 4096 + (cz + dz + 2048);
+                const bucket = this.obstacleCells.get(key);
+                if (!bucket) continue;
+                for (const obstacle of bucket) visit(obstacle);
+            }
         }
-        return new THREE.Vector3(0, 0, -80);
-    }
-
-    public getStartDirection(): THREE.Vector3 {
-        if (this.trackPoints.length > 1) {
-            const direction = this.getStartDirection2D();
-            return new THREE.Vector3(direction.x, 0, direction.y);
-        }
-        return new THREE.Vector3(0, 0, 1);
-    }
-
-    public getGroundMesh(): THREE.Mesh | null {
-        return this.groundMesh;
-    }
-
-    // This method helps adjust the terrain height at specific points, useful for debugging
-    public getHeightAt(x: number, z: number): number {
-        if (this.groundMesh) {
-            return this.groundMesh.getHeightAt(x, z);
-        }
-        return 0;
     }
 
     public getSurfaceHeightAt(x: number, z: number): number {
-        const groundHeight = this.getHeightAt(x, z);
-        return this.isPointOnTrack(x, z) ? groundHeight + TRACK_HEIGHT_OFFSET : groundHeight;
+        this.terrain.sampleSurface(x, z, this._surfaceSample);
+        const fade = 1 - THREE.MathUtils.smoothstep(this._surfaceSample.trackDistance, DRIVABLE_HALF_WIDTH, DRIVABLE_HALF_WIDTH + 2);
+        return this._surfaceSample.height + TRACK_SURFACE_OFFSET * fade;
     }
 
-    public getTrackMesh(): THREE.Mesh | null {
-        return this.trackMesh;
+    public isPointOnTrack(x: number, z: number): boolean {
+        return this.trackPath.query(x, z).distance <= DRIVABLE_HALF_WIDTH;
     }
 
-    public updateShaderTime(elapsedTime: number): void {
-        if (this.groundMesh) {
-            const groundMat = this.groundMesh.material as THREE.ShaderMaterial;
-            if (groundMat.uniforms?.u_time) {
-                groundMat.uniforms.u_time.value = elapsedTime;
-            }
-        }
-        if (this.trackMesh) {
-            const trackMat = this.trackMesh.material as THREE.ShaderMaterial;
-            if (trackMat.uniforms?.u_time) {
-                trackMat.uniforms.u_time.value = elapsedTime;
-            }
-        }
+    public queryTrack(x: number, z: number): Readonly<TrackQuery> {
+        return this.trackPath.query(x, z);
     }
 
-    public onResize(width: number, height: number): void {
-        this.groundResize?.(width, height);
-        this.trackResize?.(width, height);
+    public getTrackPath(): TrackPath {
+        return this.trackPath;
+    }
+
+    public getTerrain(): Terrain {
+        return this.terrain;
+    }
+
+    public getStartPosition(): THREE.Vector3 {
+        const start = this.trackPath.samples[0];
+        // Line up a couple of car lengths behind the painted line.
+        const backOff = 6;
+        const x = start.x - start.tangentX * backOff;
+        const z = start.z - start.tangentZ * backOff;
+        return new THREE.Vector3(x, this.getSurfaceHeightAt(x, z), z);
+    }
+
+    public getStartDirection(): THREE.Vector3 {
+        const start = this.trackPath.samples[0];
+        return new THREE.Vector3(start.tangentX, 0, start.tangentZ).normalize();
+    }
+
+    public setStartLights(lit: number, go: boolean): void {
+        this.finishLine?.setStartLights(lit, go);
+    }
+
+    public update(elapsed: number): void {
+        updateWind(elapsed);
+        this.sky?.update(elapsed);
     }
 
     public dispose(): void {
-        const geometries = new Set<THREE.BufferGeometry>();
-        const materials = new Set<THREE.Material>();
-        const textures = new Set<THREE.Texture>();
-
-        for (const obj of this.terrainObjects) {
-            this.scene.remove(obj);
-            obj.traverse((child) => {
-                if (child instanceof THREE.Mesh) {
-                    if (child.geometry) {
-                        geometries.add(child.geometry);
-                    }
-                    if (Array.isArray(child.material)) {
-                        child.material.forEach((m) => materials.add(m));
-                    } else {
-                        materials.add(child.material);
-                    }
-                }
-            });
+        for (const root of this.roots) {
+            this.scene.remove(root);
         }
+        this.roots.length = 0;
 
-        for (const material of materials) {
-            for (const value of Object.values(material)) {
-                if (value instanceof THREE.Texture) {
-                    textures.add(value);
-                }
-            }
+        for (const disposable of this.disposables) {
+            disposable.dispose();
         }
+        this.disposables.length = 0;
 
-        geometries.forEach((geometry) => geometry.dispose());
-        textures.forEach((texture) => texture.dispose());
-        materials.forEach((material) => material.dispose());
-
-        this.terrainObjects.length = 0;
-        this.trackPoints.length = 0;
-        this.groundMesh = null;
-        this.trackMesh = null;
-        this.groundResize = null;
-        this.trackResize = null;
+        this.obstacles.length = 0;
+        this.obstacleCells.clear();
+        this.finishLine = null;
+        this.sky = null;
     }
 }

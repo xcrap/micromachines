@@ -1,166 +1,175 @@
 import * as THREE from "three";
+import { NOISE_GLSL } from "../core/Noise";
+import { injectSurfaceShader } from "../core/ShaderInject";
+import { GROUND_SIZE, TRACK_WIDTH } from "../core/Config";
+import type { Terrain } from "./Terrain";
 
-export function createGround(
-    scene: THREE.Scene,
-    terrainObjects: THREE.Object3D[],
-): { mesh: THREE.Mesh, onResize: (width: number, height: number) => void } {
-    const groundSize = 200;
-    const groundSegments = 150;
-    const groundGeometry = new THREE.PlaneGeometry(
-        groundSize,
-        groundSize,
-        groundSegments,
-        groundSegments,
-    );
+export interface GroundResult {
+    mesh: THREE.Mesh;
+    material: THREE.MeshStandardMaterial;
+    dispose(): void;
+}
 
-    // Modify the geometry to create height variations
-    const positionAttribute = groundGeometry.getAttribute("position");
-    const vertex = new THREE.Vector3();
-    const computeHeight = (x: number, z: number): number => {
-        let height = Math.sin(x * 0.05) * Math.cos(z * 0.05) * 2.0;
-        height += Math.sin(x * 0.02) * Math.cos(z * 0.02) * 5.0;
-        const distance = Math.sqrt(x * x + z * z);
-        if (distance > 20) return height;
-        if (distance <= 10) return 0;
-        return (height * (distance - 10)) / 10;
-    };
+const GROUND_FRAGMENT_COMMON = /* glsl */ `
+${NOISE_GLSL}
+varying float vTrackDist;
 
-    for (let i = 0; i < positionAttribute.count; i++) {
-        vertex.fromBufferAttribute(positionAttribute, i);
-        vertex.z = computeHeight(vertex.x, vertex.y);
-        positionAttribute.setXYZ(i, vertex.x, vertex.y, vertex.z);
+// Height field standing in for the grass canopy. Cheap on purpose — it gets
+// sampled three times per pixel to derive a gradient for the shading normal.
+float mm_grassHeight(vec2 p) {
+    return mm_noise(p * 2.3) * 0.62 + mm_noise(p * 7.9) * 0.38;
+}
+`;
+
+/**
+ * Perturbs the lit normal with the grass height field. Without this the ground is a
+ * perfectly smooth surface and no amount of colour noise stops it reading as flat paint.
+ */
+const GROUND_FRAGMENT_NORMAL = /* glsl */ `
+{
+    float bumpFade = 1.0 - smoothstep(16.0, 62.0, vViewDepth);
+    if (bumpFade > 0.01) {
+        vec2 p = vWorldPosition.xz;
+        float step = 0.16;
+        float h0 = mm_grassHeight(p);
+        float hx = mm_grassHeight(p + vec2(step, 0.0));
+        float hz = mm_grassHeight(p + vec2(0.0, step));
+
+        // Bare ground and the packed shoulder are much smoother than open grass.
+        float verge = smoothstep(uRoadHalfWidth, uRoadHalfWidth + 3.0, vTrackDist);
+        vec3 gradient = vec3(hx - h0, 0.0, hz - h0) / step;
+        vec3 bumped = normalize(vWorldNormal - gradient * (0.34 * bumpFade * verge));
+        normal = normalize((viewMatrix * vec4(bumped, 0.0)).xyz);
+    }
+}
+`;
+
+const GROUND_FRAGMENT_COLOR = /* glsl */ `
+{
+    vec2 wp = vWorldPosition.xz;
+
+    // High frequency detail is faded out with distance so the ground never crawls or aliases.
+    float detailFade = 1.0 - smoothstep(55.0, 165.0, vViewDepth);
+
+    vec3 grassDeep   = vec3(0.078, 0.188, 0.063);
+    vec3 grassMid    = vec3(0.169, 0.349, 0.102);
+    vec3 grassLight  = vec3(0.310, 0.494, 0.161);
+    vec3 grassDry    = vec3(0.478, 0.463, 0.196);
+    vec3 clover      = vec3(0.216, 0.404, 0.196);
+    vec3 soil        = vec3(0.318, 0.239, 0.145);
+    vec3 rock        = vec3(0.400, 0.392, 0.365);
+
+    // Rotated domains break up the value-noise lattice, which is otherwise visible as
+    // square patches once the camera gets close to the ground.
+    mat2 turn = mat2(0.8776, -0.4794, 0.4794, 0.8776);
+    vec2 wpRot = turn * wp;
+
+    float macro  = mm_fbm(wp * 0.013, 4);
+    float meso   = mm_fbm(wpRot * 0.062, 4);
+    float patchy = mm_fbm(wpRot * 0.17 + vec2(7.0, 41.0), 3);
+    float fine   = mm_noise(wp * 0.55);
+    float micro  = mm_noise(wpRot * 3.1);
+
+    vec3 color = mix(grassDeep, grassMid, smoothstep(0.25, 0.72, macro));
+    color = mix(color, grassLight, smoothstep(0.42, 0.88, meso) * 0.75);
+
+    // Mid-scale mottling, otherwise open ground reads as flat paint up close.
+    color = mix(color, grassDeep, smoothstep(0.72, 0.18, patchy) * 0.32);
+    color = mix(color, grassLight, smoothstep(0.48, 0.95, patchy) * 0.3);
+
+    float dryPatch = smoothstep(0.54, 0.82, mm_fbm(wp * 0.021 + vec2(63.0, 17.0), 3));
+    color = mix(color, grassDry, dryPatch * 0.45);
+
+    float soilPatch = smoothstep(0.68, 0.90, mm_fbm(wp * 0.036 + vec2(151.0, 92.0), 4));
+    color = mix(color, soil, soilPatch * 0.35);
+
+    float cloverPatch = smoothstep(0.60, 0.78, mm_fbm(wpRot * 0.34 + vec2(211.0, 47.0), 3));
+    color = mix(color, clover, cloverPatch * 0.3);
+
+    // Tufts: voronoi cells read as individual clumps, dark in the gaps between them.
+    float tuft = mm_voronoi(wpRot * 1.7);
+    float tuftShade = mix(0.87, 1.09, smoothstep(0.04, 0.5, tuft));
+    color *= mix(1.0, tuftShade, detailFade);
+
+    // Anisotropic noise streaks along one axis, which reads as blade direction.
+    float blades = mm_noise(wpRot * vec2(2.6, 13.0)) - 0.5;
+    color += vec3(blades * 0.05, blades * 0.10, blades * 0.03) * detailFade;
+    color += (micro - 0.5) * 0.035 * detailFade;
+
+    // Steep faces show through as bare soil and rock, with a little strata banding
+    // so the enclosing hills do not flatten into one grey mass.
+    float slope = 1.0 - clamp(vWorldNormal.y, 0.0, 1.0);
+    float strata = mm_fbm(vec2(wpRot.x * 0.06 + wpRot.y * 0.03, vWorldPosition.y * 0.28), 3);
+    vec3 exposed = mix(soil, rock, smoothstep(0.35, 0.7, strata));
+    color = mix(color, exposed * (0.85 + strata * 0.3), smoothstep(0.22, 0.5, slope));
+    color = mix(color, rock * (0.8 + strata * 0.4), smoothstep(0.55, 0.85, slope) * 0.75);
+
+    // Worn, dusty shoulder where cars run wide off the road.
+    float shoulder = 1.0 - smoothstep(uRoadHalfWidth, uRoadHalfWidth + 2.6, vTrackDist);
+    float shoulderNoise = mm_fbm(wp * 0.5, 3);
+    float wear = shoulder * shoulder * (0.5 + shoulderNoise * 0.6);
+    color = mix(color, vec3(0.353, 0.278, 0.180), clamp(wear, 0.0, 0.85));
+
+    float ao = 0.90 + mm_noise(wp * 0.28) * 0.10;
+    diffuseColor.rgb = color * ao;
+}
+`;
+
+export function createGround(terrain: Terrain, segments: number): GroundResult {
+    const geometry = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE, segments, segments);
+    geometry.rotateX(-Math.PI / 2);
+
+    const position = geometry.getAttribute("position") as THREE.BufferAttribute;
+    const vertexCount = position.count;
+    const trackDistance = new Float32Array(vertexCount);
+    const sample = { height: 0, trackDistance: 0 };
+
+    for (let i = 0; i < vertexCount; i++) {
+        const x = position.getX(i);
+        const z = position.getZ(i);
+        terrain.sampleSurface(x, z, sample);
+        position.setY(i, sample.height);
+        trackDistance[i] = sample.trackDistance;
     }
 
-    // Update the geometry
-    groundGeometry.computeVertexNormals();
+    position.needsUpdate = true;
+    geometry.setAttribute("aTrackDist", new THREE.BufferAttribute(trackDistance, 1));
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
 
-    const grassShaderMaterial = new THREE.ShaderMaterial({
-        uniforms: {
-            u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
-        },
-        vertexShader: `
-            varying vec2 v_uv;
-            varying vec3 v_worldPos;
-
-            void main() {
-                v_uv = uv;
-                v_worldPos = (modelMatrix * vec4(position, 1.0)).xyz;
-                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-            }
-        `,
-        fragmentShader: `
-            precision mediump float;
-
-            uniform vec2 u_resolution;
-            varying vec2 v_uv;
-            varying vec3 v_worldPos;
-
-            float hash(vec2 p) {
-                return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-            }
-
-            float hash2(vec2 p) {
-                return fract(sin(dot(p, vec2(269.5, 183.3))) * 43758.5453);
-            }
-
-            float noise(vec2 p) {
-                vec2 i = floor(p);
-                vec2 f = fract(p);
-                f = f * f * (3.0 - 2.0 * f);
-                return mix(
-                    mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
-                    mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x),
-                    f.y
-                );
-            }
-
-            float fbm(vec2 p, int octaves) {
-                float value = 0.0;
-                float amp = 0.5;
-                float freq = 1.0;
-                for (int i = 0; i < 6; i++) {
-                    if (i >= octaves) break;
-                    value += amp * noise(p * freq);
-                    amp *= 0.5;
-                    freq *= 2.0;
-                }
-                return value;
-            }
-
-            void main() {
-                vec2 wp = v_worldPos.xz;
-
-                vec3 grassDark = vec3(0.15, 0.35, 0.08);
-                vec3 grassMid = vec3(0.22, 0.48, 0.12);
-                vec3 grassLight = vec3(0.35, 0.58, 0.18);
-                vec3 grassYellow = vec3(0.55, 0.52, 0.20);
-                vec3 dirtBrown = vec3(0.42, 0.32, 0.18);
-                vec3 cloverLight = vec3(0.28, 0.45, 0.22);
-
-                float n1 = fbm(wp * 0.08 + vec2(10.0, 20.0), 4);
-                float n2 = fbm(wp * 0.15 + vec2(30.0, 50.0), 3);
-                float n3 = noise(wp * 0.4 + vec2(5.0, 15.0));
-                float microNoise = noise(wp * 2.0);
-
-                vec3 baseColor = mix(grassDark, grassMid, n1);
-                baseColor = mix(baseColor, grassLight, n2 * 0.6);
-
-                float yellowPatches = smoothstep(0.55, 0.75, fbm(wp * 0.12 + vec2(100.0, 80.0), 3));
-                baseColor = mix(baseColor, grassYellow, yellowPatches * 0.35);
-
-                float dirtPatches = smoothstep(0.7, 0.85, fbm(wp * 0.06 + vec2(200.0, 150.0), 4));
-                baseColor = mix(baseColor, dirtBrown, dirtPatches * 0.25);
-
-                float clover = smoothstep(0.6, 0.7, noise(wp * 0.5 + vec2(300.0, 250.0)));
-                clover *= smoothstep(0.5, 0.6, noise(wp * 0.3 + vec2(350.0, 300.0)));
-                baseColor = mix(baseColor, cloverLight, clover * 0.3);
-
-                float grassBlades = noise(wp * 8.0) * 0.08;
-                baseColor += vec3(grassBlades * 0.5, grassBlades, grassBlades * 0.3);
-
-                baseColor += (microNoise - 0.5) * 0.04;
-
-                float ao = 0.92 + n3 * 0.08;
-                baseColor *= ao;
-
-                float vignette = 1.0 - length(v_uv - 0.5) * 0.3;
-                baseColor *= vignette;
-
-                gl_FragColor = vec4(baseColor, 1.0);
-            }
-        `,
-        side: THREE.DoubleSide,
-        polygonOffset: true,
-        polygonOffsetFactor: 1,
-        polygonOffsetUnits: 1
+    const material = new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        roughness: 0.96,
+        metalness: 0,
+        dithering: true,
     });
 
-    // Make sure these settings are applied to our shader material
-    grassShaderMaterial.needsUpdate = true;
-    grassShaderMaterial.uniforms.u_resolution.value.set(window.innerWidth, window.innerHeight);
+    injectSurfaceShader(material, {
+        cacheKey: "mm-ground",
+        uniforms: {
+            uRoadHalfWidth: { value: TRACK_WIDTH / 2 + 1.5 },
+        },
+        vertexCommon: "attribute float aTrackDist;\nvarying float vTrackDist;",
+        vertexBody: "vTrackDist = aTrackDist;",
+        fragmentCommon: `uniform float uRoadHalfWidth;\n${GROUND_FRAGMENT_COMMON}`,
+        fragmentColor: GROUND_FRAGMENT_COLOR,
+        fragmentNormal: GROUND_FRAGMENT_NORMAL,
+    });
 
-    // Create the ground mesh with the shader material
-    const groundMesh = new THREE.Mesh(groundGeometry, grassShaderMaterial);
-    groundMesh.rotation.x = -Math.PI / 2; // Rotate to make it horizontal
-    groundMesh.receiveShadow = true;
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.receiveShadow = true;
+    mesh.castShadow = false;
+    mesh.matrixAutoUpdate = false;
+    mesh.updateMatrix();
+    mesh.name = "ground";
+    mesh.userData.nonCollidable = true;
 
-    // Define an interface for the mesh with a getHeightAt method
-    interface GroundMeshWithHeight extends THREE.Mesh {
-        getHeightAt(x: number, z: number): number;
-        material: THREE.ShaderMaterial; // Add this for TypeScript
-    }
-
-    // Create the ground mesh with height functionality
-    const customGroundMesh = groundMesh as unknown as GroundMeshWithHeight;
-
-    customGroundMesh.getHeightAt = computeHeight;
-
-    scene.add(groundMesh);
-    terrainObjects.push(groundMesh);
-
-    const onResize = (width: number, height: number) => {
-        customGroundMesh.material.uniforms.u_resolution.value.set(width, height);
+    return {
+        mesh,
+        material,
+        dispose() {
+            geometry.dispose();
+            material.dispose();
+        },
     };
-
-    return { mesh: groundMesh, onResize };
 }

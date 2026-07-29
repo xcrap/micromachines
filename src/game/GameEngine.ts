@@ -3,171 +3,444 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { CarController } from "./car/CarController";
 import { MapBuilder } from "./map/MapBuilder";
 import { InputManager } from "./input/InputManager";
+import { ParticleSystem } from "./effects/ParticleSystem";
+import { RaceManager, type RaceState } from "./race/RaceManager";
+import { detectQualityTier, FOG_COLOR, FOG_DENSITY, SUN_DIRECTION, type QualityTier } from "./core/Config";
+
+export interface HudState {
+    speedKph: number;
+    boost: number;
+    drifting: boolean;
+    airborne: boolean;
+    onTrack: boolean;
+    lap: number;
+    totalLaps: number;
+    lapTime: number;
+    lastLap: number | null;
+    bestLap: number | null;
+    totalTime: number;
+    raceState: RaceState;
+    countdown: number;
+    wrongWay: boolean;
+    fps: number;
+    quality: QualityTier["name"];
+}
+
+export interface HudEvents {
+    onLapCompleted(lap: number, lapTime: number, isBest: boolean): void;
+    onRaceFinished(totalTime: number): void;
+}
+
+const PHYSICS_STEP = 1 / 120;
+const MAX_SUBSTEPS = 8;
+const SUN_DISTANCE = 90;
+
+/**
+ * High and far back on purpose. The whole appeal of Micro Machines is that the cars are
+ * tiny specks on a big track, so the camera sits well above and the field of view stays put.
+ */
+const CAMERA_DISTANCE = 26;
+const CAMERA_HEIGHT = 20;
+const CAMERA_LOOK_AHEAD = 9;
+const CAMERA_FOV = 44;
 
 export class GameEngine {
-    private scene: THREE.Scene;
-    private camera: THREE.PerspectiveCamera;
-    private renderer: THREE.WebGLRenderer;
-    private controls: OrbitControls;
-    private timer: THREE.Timer;
-    private inputManager: InputManager;
-    private carController: CarController;
-    private mapBuilder: MapBuilder;
-    private lights: THREE.Light[] = [];
-    private cameraOccluders: THREE.Object3D[] = [];
-    private isRunning = false;
-    private cameraMode: "follow" | "free" = "follow";
-    private rafId: number | null = null;
-    private hasCameraState = false;
-    private readonly maxPixelRatio = 1.75;
+    private readonly scene = new THREE.Scene();
+    private readonly camera: THREE.PerspectiveCamera;
+    private readonly renderer: THREE.WebGLRenderer;
+    private readonly controls: OrbitControls;
+    private readonly quality: QualityTier;
 
-    private handleResize = () => this.onWindowResize();
-    private handleKeyDown = (e: KeyboardEvent) => this.onKeyDown(e);
+    private readonly inputManager: InputManager;
+    private readonly mapBuilder: MapBuilder;
+    private readonly particles: ParticleSystem;
+    private readonly carController: CarController;
+    private readonly raceManager = new RaceManager();
+
+    private readonly sunLight: THREE.DirectionalLight;
+    private readonly lights: THREE.Object3D[] = [];
+
+    private cameraMode: "follow" | "free" = "follow";
+    private isRunning = false;
+    private rafId: number | null = null;
+    private lastTimestamp = 0;
+    private accumulator = 0;
+    private elapsed = 0;
+
+    private renderScale = 1;
+    private frameTimeAverage = 16.7;
+    private qualitySamples = 0;
+    private fpsAverage = 60;
+
+    private hudListener: ((state: HudState) => void) | null = null;
+    private hudEvents: HudEvents | null = null;
+
+    private hasCameraState = false;
+
+    private readonly hudState: HudState = {
+        speedKph: 0,
+        boost: 0,
+        drifting: false,
+        airborne: false,
+        onTrack: true,
+        lap: 1,
+        totalLaps: 3,
+        lapTime: 0,
+        lastLap: null,
+        bestLap: null,
+        totalTime: 0,
+        raceState: "countdown",
+        countdown: 0,
+        wrongWay: false,
+        fps: 60,
+        quality: "medium",
+    };
+
+    private readonly _sunOffset = new THREE.Vector3(...SUN_DIRECTION).normalize().multiplyScalar(SUN_DISTANCE);
+    private readonly _cameraGoal = new THREE.Vector3();
+    private readonly _cameraLook = new THREE.Vector3();
+    private readonly _cameraLookCurrent = new THREE.Vector3();
+
+    private handleResize = () => this.onResize();
+    private handleVisibility = () => {
+        if (document.hidden) this.accumulator = 0;
+        this.lastTimestamp = 0;
+    };
 
     constructor(container: HTMLElement) {
-        // Initialize Three.js scene
-        this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0x87ceeb); // Sky blue background
+        this.quality = detectQualityTier();
+        this.hudState.quality = this.quality.name;
 
-        // Initialize camera with wider field of view
+        this.scene.background = new THREE.Color(FOG_COLOR);
+        this.scene.fog = new THREE.FogExp2(FOG_COLOR, FOG_DENSITY);
+
         this.camera = new THREE.PerspectiveCamera(
-            82,
-            container.clientWidth / container.clientHeight,
-            0.1,
-            1000,
+            CAMERA_FOV,
+            Math.max(1, container.clientWidth) / Math.max(1, container.clientHeight),
+            0.3,
+            1400,
         );
-        this.camera.position.set(0, 20, 20); // Higher and further back for better overview
-        this.camera.lookAt(0, 0, 0);
 
-        // Initialize renderer
         this.renderer = new THREE.WebGLRenderer({
-            antialias: true,
+            antialias: this.quality.name !== "low",
             alpha: false,
             stencil: false,
             powerPreference: "high-performance",
         });
         this.renderer.outputColorSpace = THREE.SRGBColorSpace;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 1.05;
-        this.resizeRenderer(container.clientWidth, container.clientHeight);
+        this.renderer.toneMappingExposure = 1.12;
         this.renderer.shadowMap.enabled = true;
+        // PCFSoftShadowMap is deprecated in current three and silently falls back to this anyway.
         this.renderer.shadowMap.type = THREE.PCFShadowMap;
+        this.renderer.setSize(Math.max(1, container.clientWidth), Math.max(1, container.clientHeight));
+        this.renderer.domElement.style.display = "block";
         container.appendChild(this.renderer.domElement);
 
-        // Initialize orbit controls for mouse view control
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.enableDamping = true;
-        this.controls.dampingFactor = 0.05;
-        this.controls.minDistance = 3; // Allow closer zoom
-        this.controls.maxDistance = 100; // Allow further zoom out for map overview
-        this.controls.maxPolarAngle = Math.PI / 2 - 0.1; // Prevent going below ground
-        this.controls.enabled = false; // Disabled by default in follow mode
+        this.controls.dampingFactor = 0.06;
+        this.controls.minDistance = 4;
+        this.controls.maxDistance = 140;
+        this.controls.maxPolarAngle = Math.PI / 2 - 0.05;
+        this.controls.enabled = false;
 
-        // Initialize timer for time-based animations
-        this.timer = new THREE.Timer();
-        this.timer.connect(document);
-
-        // Initialize input manager
         this.inputManager = new InputManager();
 
-        // Initialize map
-        this.mapBuilder = new MapBuilder(this.scene);
+        this.mapBuilder = new MapBuilder(this.scene, this.quality);
         this.mapBuilder.buildMap();
-        this.cameraOccluders = this.mapBuilder.getTerrainObjects().filter((object) => (
-            object !== this.mapBuilder.getGroundMesh() &&
-            object !== this.mapBuilder.getTrackMesh() &&
-            object.userData.nonCollidable !== true
-        ));
 
-        // Initialize car
-        this.carController = new CarController(
-            this.scene,
-            this.inputManager,
-            this.mapBuilder,
-        );
+        this.particles = new ParticleSystem(this.quality.particleCount);
+        this.scene.add(this.particles.points);
 
-        // Add lights
-        this.setupLights();
+        this.carController = new CarController(this.scene, this.inputManager, this.mapBuilder, this.particles);
 
-        this.updateCameraFollow(1 / 60);
+        this.sunLight = this.setupLights();
+
+        this.applyPixelRatio();
+        this.particles.setViewport(this.renderer.domElement.height, THREE.MathUtils.degToRad(CAMERA_FOV));
+        this.updateCameraFollow(1 / 60, true);
+        this.updateSun();
         this.renderer.render(this.scene, this.camera);
 
-        // Handle window resize
         window.addEventListener("resize", this.handleResize);
-
-        // Handle camera mode toggle
-        window.addEventListener("keydown", this.handleKeyDown);
+        document.addEventListener("visibilitychange", this.handleVisibility);
     }
 
-    private onKeyDown(event: KeyboardEvent): void {
-        if (event.repeat) return;
+    private setupLights(): THREE.DirectionalLight {
+        const hemisphere = new THREE.HemisphereLight(0xbcd9f2, 0x50543a, 1.05);
+        this.scene.add(hemisphere);
+        this.lights.push(hemisphere);
 
-        // Toggle camera mode with 'C' key
-        if (event.key === "c" || event.key === "C") {
+        const ambient = new THREE.AmbientLight(0xffffff, 0.18);
+        this.scene.add(ambient);
+        this.lights.push(ambient);
+
+        const sun = new THREE.DirectionalLight(0xfff2d8, 2.6);
+        sun.castShadow = true;
+
+        const radius = this.quality.shadowRadius;
+        sun.shadow.mapSize.set(this.quality.shadowMapSize, this.quality.shadowMapSize);
+        sun.shadow.camera.left = -radius;
+        sun.shadow.camera.right = radius;
+        sun.shadow.camera.top = radius;
+        sun.shadow.camera.bottom = -radius;
+        sun.shadow.camera.near = 1;
+        sun.shadow.camera.far = SUN_DISTANCE * 2.4;
+        sun.shadow.bias = -0.0006;
+        sun.shadow.normalBias = 0.035;
+
+        this.scene.add(sun);
+        this.scene.add(sun.target);
+        this.lights.push(sun, sun.target);
+
+        return sun;
+    }
+
+    public setHudListener(listener: ((state: HudState) => void) | null): void {
+        this.hudListener = listener;
+    }
+
+    public setHudEvents(events: HudEvents | null): void {
+        this.hudEvents = events;
+    }
+
+    public start(): void {
+        if (this.isRunning) return;
+        this.isRunning = true;
+        this.lastTimestamp = 0;
+        this.rafId = requestAnimationFrame(this.animate);
+    }
+
+    private animate = (timestamp: number): void => {
+        if (!this.isRunning) return;
+        this.rafId = requestAnimationFrame(this.animate);
+
+        if (this.lastTimestamp === 0) {
+            this.lastTimestamp = timestamp;
+            return;
+        }
+
+        const frameMs = timestamp - this.lastTimestamp;
+        this.lastTimestamp = timestamp;
+
+        const deltaTime = Math.min(frameMs / 1000, 0.1);
+        this.elapsed += deltaTime;
+
+        this.trackPerformance(frameMs);
+        this.handleActions();
+        this.stepSimulation(deltaTime);
+        this.updateRace(deltaTime);
+
+        this.mapBuilder.update(this.elapsed);
+        this.particles.update(deltaTime);
+        this.updateCamera(deltaTime);
+        this.updateSun();
+        this.publishHud();
+
+        this.renderer.render(this.scene, this.camera);
+    };
+
+    /** Physics runs on a fixed step so handling is frame-rate independent. */
+    private stepSimulation(deltaTime: number): void {
+        const canDrive = this.raceManager.canDrive();
+        this.accumulator += deltaTime;
+
+        let steps = 0;
+        while (this.accumulator >= PHYSICS_STEP && steps < MAX_SUBSTEPS) {
+            this.carController.update(PHYSICS_STEP, canDrive);
+            this.accumulator -= PHYSICS_STEP;
+            steps++;
+        }
+
+        if (steps === MAX_SUBSTEPS) this.accumulator = 0;
+    }
+
+    private updateRace(deltaTime: number): void {
+        const position = this.carController.getPositionRef();
+        const query = this.mapBuilder.queryTrack(position.x, position.z);
+
+        const events = this.raceManager.update(
+            deltaTime,
+            query,
+            this.carController.getDirectionRef() as THREE.Vector3,
+            this.carController.getSpeed(),
+            this.carController.isOnTrack(),
+        );
+
+        this.mapBuilder.setStartLights(this.raceManager.getStartLights(), this.raceManager.isGo());
+
+        if (events.lapCompleted) {
+            const snapshot = this.raceManager.getSnapshot();
+            this.hudEvents?.onLapCompleted(snapshot.lap, snapshot.lastLap ?? 0, events.newBestLap);
+        }
+
+        if (events.raceFinished) {
+            this.hudEvents?.onRaceFinished(this.raceManager.getSnapshot().totalTime);
+        }
+    }
+
+    private handleActions(): void {
+        if (this.inputManager.consumeAction("toggleCamera")) {
             this.toggleCameraMode();
         }
+
+        if (this.inputManager.consumeAction("respawn")) {
+            const t = this.carController.respawn();
+            this.raceManager.resyncTo(t);
+            this.hasCameraState = false;
+        }
+
+        if (this.inputManager.consumeAction("restart")) {
+            this.restart();
+        }
+    }
+
+    public restart(): void {
+        this.carController.resetToStart();
+        this.raceManager.restart();
+        this.hasCameraState = false;
     }
 
     private toggleCameraMode(): void {
         this.cameraMode = this.cameraMode === "follow" ? "free" : "follow";
         this.controls.enabled = this.cameraMode === "free";
 
-        // When switching to free mode, set the camera target to the car's position
         if (this.cameraMode === "free") {
-            const carPosition = this.carController.getPosition();
-            this.controls.target.copy(carPosition);
-        }
-
-        // Reset camera position when switching to follow mode
-        if (this.cameraMode === "follow") {
-            const carPosition = this.carController.getPosition();
-            const carDirection = this.carController.getDirection();
-
-            this._cameraTarget.set(
-                carPosition.x - carDirection.x * 10,
-                carPosition.y + 8,
-                carPosition.z - carDirection.z * 10,
-            );
-
-            this.camera.position.copy(this._cameraTarget);
-            this.camera.lookAt(carPosition);
+            this.controls.target.copy(this.carController.getPositionRef());
+            this.controls.update();
+        } else {
             this.hasCameraState = false;
         }
     }
 
-    private setupLights(): void {
-        // Ambient light
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6); // Increased ambient light
-        this.scene.add(ambientLight);
-        this.lights.push(ambientLight);
+    private updateCamera(deltaTime: number): void {
+        if (this.cameraMode === "free") {
+            const targetBlend = 1 - Math.exp(-5 * deltaTime);
+            this.controls.target.lerp(this.carController.getPositionRef() as THREE.Vector3, targetBlend);
+            this.controls.update();
+            return;
+        }
 
-        // Directional light (sun)
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.15);
-        directionalLight.position.set(50, 100, 75); // Positioned further away for larger map
-        directionalLight.castShadow = true;
-
-        // Configure shadow properties for larger map
-        directionalLight.shadow.mapSize.width = 4096;
-        directionalLight.shadow.mapSize.height = 4096;
-        directionalLight.shadow.bias = -0.00005;
-        directionalLight.shadow.normalBias = 0.08;
-        directionalLight.shadow.camera.near = 0.5;
-        directionalLight.shadow.camera.far = 500;
-        directionalLight.shadow.camera.left = -100;
-        directionalLight.shadow.camera.right = 100;
-        directionalLight.shadow.camera.top = 100;
-        directionalLight.shadow.camera.bottom = -100;
-
-        this.scene.add(directionalLight);
-        this.lights.push(directionalLight);
-
-        // Add a hemisphere light for better ambient lighting
-        const hemisphereLight = new THREE.HemisphereLight(0x87ceeb, 0x8b7355, 0.7); // Sky color, ground color
-        this.scene.add(hemisphereLight);
-        this.lights.push(hemisphereLight);
+        this.updateCameraFollow(deltaTime, false);
     }
 
-    private onWindowResize(): void {
+    /**
+     * Deliberately static: fixed distance, height, look-ahead and field of view. The camera
+     * only ever tracks the car's position and heading — it never zooms, dollies or shakes on
+     * its own, because a chase cam that moves by itself reads as the game glitching.
+     */
+    private updateCameraFollow(deltaTime: number, snap: boolean): void {
+        const position = this.carController.getPositionRef();
+        const direction = this.carController.getDirectionRef();
+
+        // Portrait screens see less width, so lift a little higher to keep the road in frame.
+        const portrait = THREE.MathUtils.clamp((1.0 - this.camera.aspect) / 0.45, 0, 1);
+        const distance = THREE.MathUtils.lerp(CAMERA_DISTANCE, CAMERA_DISTANCE * 0.82, portrait);
+        const height = THREE.MathUtils.lerp(CAMERA_HEIGHT, CAMERA_HEIGHT * 1.12, portrait);
+
+        this._cameraGoal.set(
+            position.x - direction.x * distance,
+            position.y + height,
+            position.z - direction.z * distance,
+        );
+        this._cameraLook.set(
+            position.x + direction.x * CAMERA_LOOK_AHEAD,
+            position.y + 0.9,
+            position.z + direction.z * CAMERA_LOOK_AHEAD,
+        );
+
+        if (snap || !this.hasCameraState) {
+            this.camera.position.copy(this._cameraGoal);
+            this._cameraLookCurrent.copy(this._cameraLook);
+            this.hasCameraState = true;
+        }
+
+        const positionBlend = 1 - Math.exp(-7 * deltaTime);
+        const lookBlend = 1 - Math.exp(-9 * deltaTime);
+        this.camera.position.lerp(this._cameraGoal, positionBlend);
+        this._cameraLookCurrent.lerp(this._cameraLook, lookBlend);
+
+        // Safety net only: from this height terrain almost never intrudes, but the eye must
+        // never end up buried inside a hill.
+        this.liftAboveGround(this.camera.position, 1.5);
+
+        this.camera.lookAt(this._cameraLookCurrent);
+    }
+
+    private liftAboveGround(point: THREE.Vector3, clearance: number): void {
+        const floor = this.mapBuilder.getSurfaceHeightAt(point.x, point.z) + clearance;
+        if (point.y < floor) point.y = floor;
+    }
+
+    private updateSun(): void {
+        const position = this.carController.getPositionRef();
+
+        // Snapping the shadow frustum to texel boundaries stops shadow edges crawling as the car moves.
+        const texel = (this.quality.shadowRadius * 2) / this.quality.shadowMapSize;
+        const targetX = Math.round(position.x / texel) * texel;
+        const targetZ = Math.round(position.z / texel) * texel;
+        const targetY = Math.round(position.y / texel) * texel;
+
+        this.sunLight.target.position.set(targetX, targetY, targetZ);
+        this.sunLight.target.updateMatrixWorld();
+        this.sunLight.position.set(
+            targetX + this._sunOffset.x,
+            targetY + this._sunOffset.y,
+            targetZ + this._sunOffset.z,
+        );
+        this.sunLight.updateMatrixWorld();
+    }
+
+    private trackPerformance(frameMs: number): void {
+        this.frameTimeAverage += (frameMs - this.frameTimeAverage) * 0.06;
+        this.fpsAverage += (1000 / Math.max(frameMs, 1) - this.fpsAverage) * 0.06;
+        this.qualitySamples++;
+
+        if (this.qualitySamples < 90) return;
+        this.qualitySamples = 0;
+
+        // Trade resolution for frame rate before anything else — it is the least visible knob.
+        if (this.frameTimeAverage > 23 && this.renderScale > 0.62) {
+            this.renderScale = Math.max(0.62, this.renderScale - 0.12);
+            this.applyPixelRatio();
+        } else if (this.frameTimeAverage < 13.5 && this.renderScale < 1) {
+            this.renderScale = Math.min(1, this.renderScale + 0.08);
+            this.applyPixelRatio();
+        }
+    }
+
+    private applyPixelRatio(): void {
+        const devicePixelRatio = Math.min(window.devicePixelRatio || 1, this.quality.maxPixelRatio);
+        this.renderer.setPixelRatio(devicePixelRatio * this.renderScale);
+    }
+
+    private publishHud(): void {
+        if (!this.hudListener) return;
+
+        const race = this.raceManager.getSnapshot();
+        const state = this.hudState;
+
+        state.speedKph = this.carController.getSpeedKph();
+        state.boost = this.carController.getBoostCharge();
+        state.drifting = this.carController.isDrifting();
+        state.airborne = this.carController.isAirborne();
+        state.onTrack = this.carController.isOnTrack();
+        state.lap = race.lap;
+        state.totalLaps = race.totalLaps;
+        state.lapTime = race.lapTime;
+        state.lastLap = race.lastLap;
+        state.bestLap = race.bestLap;
+        state.totalTime = race.totalTime;
+        state.raceState = race.state;
+        state.countdown = race.countdown;
+        state.wrongWay = race.wrongWay;
+        state.fps = this.fpsAverage;
+
+        this.hudListener(state);
+    }
+
+    private onResize(): void {
         const container = this.renderer.domElement.parentElement;
         if (!container) return;
 
@@ -176,162 +449,43 @@ export class GameEngine {
 
         this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
-        this.resizeRenderer(width, height);
-        this.mapBuilder.onResize(width, height);
-    }
-
-    private resizeRenderer(width: number, height: number): void {
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.maxPixelRatio));
-        this.renderer.setSize(Math.max(1, width), Math.max(1, height));
-    }
-
-    public start(): void {
-        if (this.isRunning) return;
-
-        this.isRunning = true;
-        this.timer.reset();
-        this.rafId = requestAnimationFrame(this.animate);
-    }
-
-    private animate = (timestamp?: number): void => {
-        if (!this.isRunning) return;
-
-        this.rafId = requestAnimationFrame(this.animate);
-
-        this.timer.update(timestamp);
-        const deltaTime = THREE.MathUtils.clamp(this.timer.getDelta(), 0, 0.05);
-        const elapsedTime = this.timer.getElapsed();
-
-        // Update car physics and controls
-        this.carController.update(deltaTime);
-
-        // Update shader uniforms
-        this.mapBuilder.updateShaderTime(elapsedTime);
-
-        // Update camera to follow car if in follow mode
-        if (this.cameraMode === "follow") {
-            this.updateCameraFollow(deltaTime);
-        } else if (this.cameraMode === "free") {
-            // In free mode, update the orbit controls target to follow the car
-            const carPosition = this.carController.getPositionRef();
-            const targetBlend = 1 - Math.exp(-4 * deltaTime);
-            this.controls.target.lerp(carPosition, targetBlend);
-            this.controls.update();
-        }
-
-        // Render scene
-        this.renderer.render(this.scene, this.camera);
-    }
-
-    private readonly _cameraTarget = new THREE.Vector3();
-    private readonly _cameraResolvedTarget = new THREE.Vector3();
-    private readonly _cameraLookAt = new THREE.Vector3();
-    private readonly _cameraLookAtCurrent = new THREE.Vector3();
-    private readonly _cameraRaycaster = new THREE.Raycaster();
-    private readonly _cameraRayDirection = new THREE.Vector3();
-    private readonly _cameraHits: THREE.Intersection[] = [];
-
-    private updateCameraFollow(deltaTime: number): void {
-        const carPosition = this.carController.getPositionRef();
-        const carDirection = this.carController.getDirectionRef();
-        const speedNorm = Math.min(1, this.carController.getSpeed() / 28);
-        const portraitFactor = THREE.MathUtils.clamp((0.85 - this.camera.aspect) / 0.4, 0, 1);
-        const distance = THREE.MathUtils.lerp(
-            THREE.MathUtils.lerp(7, 11, speedNorm),
-            THREE.MathUtils.lerp(6, 9, speedNorm),
-            portraitFactor,
+        this.applyPixelRatio();
+        this.renderer.setSize(width, height);
+        this.particles.setViewport(
+            this.renderer.domElement.height,
+            THREE.MathUtils.degToRad(this.camera.fov),
         );
-        const height = THREE.MathUtils.lerp(
-            THREE.MathUtils.lerp(11, 13, speedNorm),
-            THREE.MathUtils.lerp(14, 16, speedNorm),
-            portraitFactor,
-        );
-        const lookAhead = THREE.MathUtils.lerp(
-            THREE.MathUtils.lerp(1, 4, speedNorm),
-            THREE.MathUtils.lerp(0.5, 2.5, speedNorm),
-            portraitFactor,
-        );
-        const lookHeight = THREE.MathUtils.lerp(0.45, 0.25, portraitFactor);
-
-        // Position camera behind and above the car
-        this._cameraTarget.set(
-            carPosition.x - carDirection.x * distance,
-            carPosition.y + height,
-            carPosition.z - carDirection.z * distance,
-        );
-        this._cameraLookAt.set(
-            carPosition.x + carDirection.x * lookAhead,
-            carPosition.y + lookHeight,
-            carPosition.z + carDirection.z * lookAhead,
-        );
-        this._cameraResolvedTarget.copy(this._cameraTarget);
-        this.resolveCameraOcclusion(this._cameraLookAt, this._cameraResolvedTarget);
-
-        if (!this.hasCameraState) {
-            this.camera.position.copy(this._cameraResolvedTarget);
-            this._cameraLookAtCurrent.copy(this._cameraLookAt);
-            this.hasCameraState = true;
-        }
-
-        // Smoothly interpolate camera position
-        const positionBlend = 1 - Math.exp(-5 * deltaTime);
-        const lookBlend = 1 - Math.exp(-7 * deltaTime);
-        this.camera.position.lerp(this._cameraResolvedTarget, positionBlend);
-        this._cameraLookAtCurrent.lerp(this._cameraLookAt, lookBlend);
-        this.camera.lookAt(this._cameraLookAtCurrent);
-    }
-
-    private resolveCameraOcclusion(origin: THREE.Vector3, target: THREE.Vector3): void {
-        if (this.cameraOccluders.length === 0) return;
-
-        this._cameraRayDirection.subVectors(target, origin);
-        const desiredDistance = this._cameraRayDirection.length();
-        if (desiredDistance < 0.001) return;
-
-        this._cameraRayDirection.divideScalar(desiredDistance);
-        this._cameraRaycaster.set(origin, this._cameraRayDirection);
-        this._cameraRaycaster.near = 1.5;
-        this._cameraRaycaster.far = desiredDistance;
-        this._cameraRaycaster.intersectObjects(this.cameraOccluders, true, this._cameraHits);
-
-        if (this._cameraHits.length > 0) {
-            const safeDistance = Math.max(3.5, this._cameraHits[0].distance - 0.6);
-            target.copy(origin).addScaledVector(this._cameraRayDirection, safeDistance);
-        }
-
-        this._cameraHits.length = 0;
     }
 
     public dispose(): void {
         this.isRunning = false;
 
-        if (this.rafId != null) {
+        if (this.rafId !== null) {
             cancelAnimationFrame(this.rafId);
             this.rafId = null;
         }
 
-        // Remove event listeners
         window.removeEventListener("resize", this.handleResize);
-        window.removeEventListener("keydown", this.handleKeyDown);
+        document.removeEventListener("visibilitychange", this.handleVisibility);
+
+        this.hudListener = null;
+        this.hudEvents = null;
+
         this.inputManager.dispose();
-
-        // Dispose of car controller resources
         this.carController.dispose();
-
-        // Dispose Three.js resources
         this.mapBuilder.dispose();
-        this.cameraOccluders.length = 0;
+
+        this.scene.remove(this.particles.points);
+        this.particles.dispose();
+
         for (const light of this.lights) {
             this.scene.remove(light);
-            light.dispose();
+            if (light instanceof THREE.Light) light.dispose();
         }
         this.lights.length = 0;
-        this.controls.dispose();
-        this.timer.dispose();
-        this.renderer.dispose();
 
-        // Remove canvas from DOM
-        const canvas = this.renderer.domElement;
-        canvas.parentElement?.removeChild(canvas);
+        this.controls.dispose();
+        this.renderer.dispose();
+        this.renderer.domElement.parentElement?.removeChild(this.renderer.domElement);
     }
 }

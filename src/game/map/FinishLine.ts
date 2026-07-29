@@ -1,216 +1,209 @@
-import * as THREE from 'three';
-import { TRACK_EDGE_BLEED, TRACK_WIDTH } from './Track';
+import * as THREE from "three";
+import { TRACK_WIDTH } from "../core/Config";
+import type { TrackPath } from "./TrackPath";
+import type { Terrain } from "./Terrain";
+import type { Obstacle } from "./Scatter";
 
-export function createFinishLine(
-    scene: THREE.Scene,
-    trackPoints: THREE.Vector2[],
-    groundMesh: THREE.Mesh,
-    startIndex: number = 0
-): THREE.Group {
-    const getHeightAt = (groundMesh as THREE.Mesh & {
-        getHeightAt: (x: number, z: number) => number
-    }).getHeightAt;
+export interface FinishLineResult {
+    group: THREE.Group;
+    obstacles: Obstacle[];
+    /** `lit` red lights during the countdown; `go` switches the whole bar to green. */
+    setStartLights(lit: number, go: boolean): void;
+    dispose(): void;
+}
 
-    const finishLine = new THREE.Group();
-    const roadWidth = TRACK_WIDTH + TRACK_EDGE_BLEED * 2;
-    const pillarWidth = 0.5;
-    const halfRoadWidth = roadWidth / 2;
-    const halfPillarSpan = halfRoadWidth + pillarWidth / 2;
-    const pillarHeight = 5;
-    const archDepth = 0.6;
+const HALF_WIDTH = TRACK_WIDTH / 2;
+const PILLAR_OFFSET = HALF_WIDTH + 2.6;
+const PILLAR_HEIGHT = 6.2;
+const LIGHT_COUNT = 5;
 
-    const pillarGeo = new THREE.BoxGeometry(pillarWidth, pillarHeight, pillarWidth);
-    const pillarMat = new THREE.MeshStandardMaterial({
-        color: 0xffffff,
-        roughness: 0.2,
-        metalness: 0.8,
-    });
+/** The start lights live inside the gantry sign, so their layout is driven by its texture. */
+const BANNER_HEIGHT = 2.9;
+const BANNER_TEXTURE_WIDTH = 2048;
+const BANNER_TEXTURE_HEIGHT = 366;
+const SOCKET_CENTER_Y_PX = 268;
+const SOCKET_RADIUS_PX = 34;
+const SOCKET_SPACING_PX = 132;
 
-    const leftPillar = new THREE.Mesh(pillarGeo, pillarMat);
-    leftPillar.position.set(-halfPillarSpan, pillarHeight / 2, 0);
-    leftPillar.castShadow = true;
+const RED_OFF = new THREE.Color(0x2e0c0c);
+const RED_ON = new THREE.Color(0xff2418);
+const GREEN_ON = new THREE.Color(0x2bff5a);
 
-    const rightPillar = new THREE.Mesh(pillarGeo, pillarMat);
-    rightPillar.position.set(halfPillarSpan, pillarHeight / 2, 0);
-    rightPillar.castShadow = true;
+export function createFinishLine(trackPath: TrackPath, terrain: Terrain): FinishLineResult {
+    const root = new THREE.Group();
+    root.name = "finish-line";
+    root.userData.nonCollidable = true;
 
-    finishLine.add(leftPillar);
-    finishLine.add(rightPillar);
+    const disposables: { dispose(): void }[] = [];
+    const obstacles: Obstacle[] = [];
 
-    const archGeo = new THREE.BoxGeometry(roadWidth + pillarWidth * 2, archDepth, 0.5);
-    const archMat = new THREE.MeshStandardMaterial({
-        color: 0xee0000,
-        roughness: 0.3,
-        metalness: 0.6,
-    });
-    const arch = new THREE.Mesh(archGeo, archMat);
-    arch.position.set(0, pillarHeight + archDepth / 2 - 0.2, 0);
-    arch.castShadow = true;
-    finishLine.add(arch);
+    const start = trackPath.samples[0];
+    const yaw = Math.atan2(start.tangentX, start.tangentZ);
+    const baseHeight = terrain.getHeightAt(start.x, start.z);
 
-    const checkeredBandGeo = new THREE.BoxGeometry(roadWidth, 0.3, 0.55);
-    const checkeredTexture = createCheckeredTexture();
-    const checkeredMat = new THREE.MeshStandardMaterial({
-        map: checkeredTexture,
-        roughness: 0.5,
-        metalness: 0.3,
-    });
-    const checkeredBand = new THREE.Mesh(checkeredBandGeo, checkeredMat);
-    checkeredBand.position.set(0, pillarHeight - 0.4, 0);
-    finishLine.add(checkeredBand);
+    // The gantry is built facing +Z and then placed on the track; the painted line is world-space.
+    const group = new THREE.Group();
+    group.position.set(start.x, baseHeight, start.z);
+    group.rotation.y = yaw;
+    root.add(group);
 
-    const stripeCount = 16;
-    const stripeSpan = TRACK_WIDTH;
-    const stripeWidth = stripeSpan / stripeCount;
-    const stripeLength = 3;
+    const steelMaterial = new THREE.MeshStandardMaterial({ color: 0xd8dde2, roughness: 0.35, metalness: 0.85 });
+    const accentMaterial = new THREE.MeshStandardMaterial({ color: 0xd8261f, roughness: 0.45, metalness: 0.25 });
+    disposables.push(steelMaterial, accentMaterial);
 
-    for (let i = 0; i < stripeCount; i++) {
-        const stripeGeo = new THREE.BoxGeometry(stripeWidth, 0.02, stripeLength);
-        const stripeMat = new THREE.MeshStandardMaterial({
-            color: i % 2 === 0 ? 0xffffff : 0x111111,
-            roughness: 0.7,
-            metalness: 0.1,
-        });
-        const stripe = new THREE.Mesh(stripeGeo, stripeMat);
-        const xPos = -stripeSpan / 2 + stripeWidth / 2 + i * stripeWidth;
-        stripe.position.set(xPos, 0.02, 0);
-        stripe.receiveShadow = true;
-        finishLine.add(stripe);
+    const pillarGeometry = new THREE.CylinderGeometry(0.28, 0.34, PILLAR_HEIGHT, 10);
+    const footGeometry = new THREE.CylinderGeometry(0.55, 0.7, 0.5, 10);
+    disposables.push(pillarGeometry, footGeometry);
+
+    for (const side of [-1, 1]) {
+        const pillar = new THREE.Mesh(pillarGeometry, steelMaterial);
+        pillar.position.set(side * PILLAR_OFFSET, PILLAR_HEIGHT / 2, 0);
+        pillar.castShadow = true;
+        group.add(pillar);
+
+        const foot = new THREE.Mesh(footGeometry, accentMaterial);
+        foot.position.set(side * PILLAR_OFFSET, 0.25, 0);
+        foot.castShadow = true;
+        group.add(foot);
+
+        const worldX = start.x + -start.tangentZ * side * PILLAR_OFFSET;
+        const worldZ = start.z + start.tangentX * side * PILLAR_OFFSET;
+        obstacles.push({ x: worldX, z: worldZ, radius: 0.7, height: PILLAR_HEIGHT, solidity: 1 });
     }
 
-    const finishGeo = new THREE.PlaneGeometry(4, 1.5);
-    const finishTexture = createFinishTexture();
-    const finishMat = new THREE.MeshStandardMaterial({
-        map: finishTexture,
-        roughness: 0.35,
-        metalness: 0.15,
+    const beamGeometry = new THREE.BoxGeometry(PILLAR_OFFSET * 2 + 0.6, 0.34, 0.34);
+    const beam = new THREE.Mesh(beamGeometry, steelMaterial);
+    beam.position.set(0, PILLAR_HEIGHT - 0.2, 0);
+    beam.castShadow = true;
+    group.add(beam);
+    disposables.push(beamGeometry);
+
+    // The gantry faces along the travel direction, so the sign is turned to greet the driver.
+    // Everything inside this group is authored in sign space, matching the banner texture.
+    const bannerWidth = PILLAR_OFFSET * 2;
+    const signGroup = new THREE.Group();
+    signGroup.position.set(0, PILLAR_HEIGHT + 1.35, 0);
+    signGroup.rotation.y = Math.PI;
+    group.add(signGroup);
+
+    const bannerTexture = createBannerTexture();
+    const bannerMaterial = new THREE.MeshStandardMaterial({
+        map: bannerTexture,
+        roughness: 0.72,
+        metalness: 0.05,
         side: THREE.DoubleSide,
     });
-    const finishSign = new THREE.Mesh(finishGeo, finishMat);
-    finishSign.position.set(0, pillarHeight + archDepth / 2 + 0.8, 0.3);
-    finishLine.add(finishSign);
+    const bannerGeometry = new THREE.PlaneGeometry(bannerWidth, BANNER_HEIGHT);
+    const banner = new THREE.Mesh(bannerGeometry, bannerMaterial);
+    banner.castShadow = true;
+    signGroup.add(banner);
+    disposables.push(bannerTexture, bannerMaterial, bannerGeometry);
 
-    const lightPoleGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.6, 8);
-    const lightGeo = new THREE.SphereGeometry(0.15, 16, 16);
-    const lightPoleMat = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.8 });
-    const lightMat = new THREE.MeshStandardMaterial({
-        color: 0xffffaa,
-        emissive: 0xffffaa,
-        emissiveIntensity: 0.8,
-    });
+    // Emissive lenses sit exactly on the sockets painted into the sign.
+    const pixelToWorld = bannerWidth / BANNER_TEXTURE_WIDTH;
+    const lensGeometry = new THREE.CircleGeometry(SOCKET_RADIUS_PX * pixelToWorld * 0.78, 18);
+    disposables.push(lensGeometry);
 
-    const lightPositions = [-halfPillarSpan + 1, halfPillarSpan - 1];
-    for (const xPos of lightPositions) {
-        const pole = new THREE.Mesh(lightPoleGeo, lightPoleMat);
-        pole.position.set(xPos, pillarHeight + 0.3, 0.3);
-        finishLine.add(pole);
+    const lightMaterials: THREE.MeshStandardMaterial[] = [];
 
-        const light = new THREE.Mesh(lightGeo, lightMat);
-        light.position.set(xPos, pillarHeight + 0.65, 0.3);
-        finishLine.add(light);
+    for (let i = 0; i < LIGHT_COUNT; i++) {
+        const socketPixelX = BANNER_TEXTURE_WIDTH / 2 + (i - (LIGHT_COUNT - 1) / 2) * SOCKET_SPACING_PX;
+        const localX = (socketPixelX / BANNER_TEXTURE_WIDTH - 0.5) * bannerWidth;
+        const localY = (0.5 - SOCKET_CENTER_Y_PX / BANNER_TEXTURE_HEIGHT) * BANNER_HEIGHT;
+
+        const material = new THREE.MeshStandardMaterial({
+            color: 0x120404,
+            emissive: RED_OFF,
+            emissiveIntensity: 0.7,
+            roughness: 0.25,
+        });
+        const lens = new THREE.Mesh(lensGeometry, material);
+        lens.position.set(localX, localY, 0.02);
+        signGroup.add(lens);
+
+        lightMaterials.push(material);
+        disposables.push(material);
     }
 
-    const capGeo = new THREE.ConeGeometry(0.25, 0.3, 8);
-    const capMat = new THREE.MeshStandardMaterial({
-        color: 0xffcc00,
-        roughness: 0.2,
-        metalness: 0.8,
-    });
-
-    for (const xPos of [-halfPillarSpan, halfPillarSpan]) {
-        const cap = new THREE.Mesh(capGeo, capMat);
-        cap.position.set(xPos, pillarHeight + archDepth + 0.05, 0);
-        cap.rotation.x = Math.PI;
-        finishLine.add(cap);
-    }
-
-    const trackPointCount = trackPoints.length;
-    const startPointIndex = ((startIndex % trackPointCount) + trackPointCount) % trackPointCount;
-    const startPoint = trackPoints[startPointIndex];
-    const y = getHeightAt(startPoint.x, startPoint.y);
-
-    finishLine.position.set(startPoint.x, y, startPoint.y);
-
-    if (trackPointCount > 1) {
-        const directionSampleOffset = 1;
-        const previousPoint = trackPoints[(startPointIndex - directionSampleOffset + trackPointCount) % trackPointCount];
-        const nextPoint = trackPoints[(startPointIndex + directionSampleOffset) % trackPointCount];
-
-        const direction = new THREE.Vector2()
-            .subVectors(nextPoint, previousPoint)
-            .normalize();
-
-        const perpDirection = new THREE.Vector2(-direction.y, direction.x);
-        const angle = Math.atan2(-perpDirection.y, perpDirection.x);
-        finishLine.rotation.y = angle;
-    }
-
-    scene.add(finishLine);
-
-    return finishLine;
+    return {
+        group: root,
+        obstacles,
+        setStartLights(lit: number, go: boolean) {
+            for (let i = 0; i < lightMaterials.length; i++) {
+                const material = lightMaterials[i];
+                if (go) {
+                    material.emissive.copy(GREEN_ON);
+                    material.emissiveIntensity = 1.5;
+                } else if (i < lit) {
+                    material.emissive.copy(RED_ON);
+                    material.emissiveIntensity = 1.6;
+                } else {
+                    material.emissive.copy(RED_OFF);
+                    material.emissiveIntensity = 0.7;
+                }
+            }
+        },
+        dispose() {
+            disposables.forEach((item) => item.dispose());
+        },
+    };
 }
 
-function createCheckeredTexture(): THREE.Texture {
-    const size = 256;
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext('2d')!;
-
-    const squares = 8;
-    const squareSize = size / squares;
-
-    for (let i = 0; i < squares; i++) {
-        for (let j = 0; j < squares; j++) {
-            ctx.fillStyle = (i + j) % 2 === 0 ? '#ffffff' : '#111111';
-            ctx.fillRect(i * squareSize, j * squareSize, squareSize, squareSize);
-        }
-    }
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.wrapS = THREE.RepeatWrapping;
-    texture.wrapT = THREE.RepeatWrapping;
-    texture.repeat.set(4, 1);
-    return texture;
-}
-
-function createFinishTexture(): THREE.Texture {
-    const width = 512;
-    const height = 192;
-    const canvas = document.createElement('canvas');
+function createBannerTexture(): THREE.Texture {
+    const width = BANNER_TEXTURE_WIDTH;
+    const height = BANNER_TEXTURE_HEIGHT;
+    const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
-    const ctx = canvas.getContext('2d')!;
+    const ctx = canvas.getContext("2d")!;
 
-    const gradient = ctx.createLinearGradient(0, 0, width, height);
-    gradient.addColorStop(0, '#fff7e0');
-    gradient.addColorStop(1, '#f0d4a0');
+    const gradient = ctx.createLinearGradient(0, 0, 0, height);
+    gradient.addColorStop(0, "#202733");
+    gradient.addColorStop(1, "#0d1116");
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, width, height);
 
-    ctx.fillStyle = '#cf1020';
-    ctx.fillRect(0, 0, width, 26);
-    ctx.fillRect(0, height - 26, width, 26);
-
-    const square = 24;
+    // Checkered flanks, with a clear middle band for the wordmark and the light bar.
+    const clearMargin = 300;
+    const square = 46;
     for (let x = 0; x < width; x += square) {
-        for (let y = 26; y < height - 26; y += square) {
-            ctx.fillStyle = ((x / square + y / square) % 2) === 0 ? '#111111' : '#ffffff';
-            ctx.globalAlpha = 0.18;
+        for (let y = 0; y < height; y += square) {
+            if (x > clearMargin - square && x < width - clearMargin) continue;
+            ctx.fillStyle = ((x / square + y / square) % 2) === 0 ? "#f2f2ee" : "#15171a";
             ctx.fillRect(x, y, square, square);
         }
     }
-    ctx.globalAlpha = 1;
 
-    ctx.fillStyle = '#111111';
-    ctx.font = 'bold 72px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('FINISH', width / 2, height / 2 + 4);
+    ctx.fillStyle = "#d8261f";
+    ctx.fillRect(clearMargin, 0, width - clearMargin * 2, 14);
+    ctx.fillRect(clearMargin, height - 14, width - clearMargin * 2, 14);
 
-    ctx.strokeStyle = '#cf1020';
-    ctx.lineWidth = 8;
-    ctx.strokeRect(8, 8, width - 16, height - 16);
+    ctx.fillStyle = "#ffd24a";
+    ctx.font = "bold 128px system-ui, -apple-system, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("MICRO MACHINES", width / 2, 116);
+
+    // Recessed sockets for the start lights, painted into the sign so the emissive
+    // lenses read as part of it rather than as bulbs bolted underneath.
+    for (let i = 0; i < LIGHT_COUNT; i++) {
+        const x = width / 2 + (i - (LIGHT_COUNT - 1) / 2) * SOCKET_SPACING_PX;
+
+        const bezel = ctx.createRadialGradient(x, SOCKET_CENTER_Y_PX, SOCKET_RADIUS_PX * 0.6, x, SOCKET_CENTER_Y_PX, SOCKET_RADIUS_PX * 1.5);
+        bezel.addColorStop(0, "#05070a");
+        bezel.addColorStop(0.62, "#171b22");
+        bezel.addColorStop(1, "rgba(23,27,34,0)");
+        ctx.fillStyle = bezel;
+        ctx.beginPath();
+        ctx.arc(x, SOCKET_CENTER_Y_PX, SOCKET_RADIUS_PX * 1.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = "#3b424d";
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.arc(x, SOCKET_CENTER_Y_PX, SOCKET_RADIUS_PX, 0, Math.PI * 2);
+        ctx.stroke();
+    }
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;

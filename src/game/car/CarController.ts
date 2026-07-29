@@ -1,565 +1,557 @@
 import * as THREE from "three";
 import type { InputManager } from "../input/InputManager";
-import { CarModel } from "./CarModel";
-import { CarPhysics, type CarInput } from "./CarPhysics";
 import type { MapBuilder } from "../map/MapBuilder";
+import type { ParticleSystem } from "../effects/ParticleSystem";
 import { TrailSystem } from "../effects/TrailSystem";
+import { CarModel, TRACK_HALF_WIDTH, WHEEL_BASE, WHEEL_POSITIONS } from "./CarModel";
+import { CarPhysics, GRASS_SURFACE, TRACK_SURFACE, type CarInput, type SurfaceState } from "./CarPhysics";
+import { WORLD_RADIUS } from "../core/Config";
+
+const GRAVITY = 26;
+const CAR_HALF_LENGTH = 1.0;
+const CAR_HALF_WIDTH = 0.62;
+const MAX_SUSPENSION_TRAVEL = 0.11;
+const BOUNDARY_RADIUS = WORLD_RADIUS - 6;
+
+const DUST_TRACK = new THREE.Color(0x9c8055);
+const DUST_GRASS = new THREE.Color(0x5c6b34);
+const DEBRIS_COLOR = new THREE.Color(0x6d5a3c);
 
 export class CarController {
-    private carModel: CarModel;
-    private carPhysics: CarPhysics;
-    private inputManager: InputManager;
-    private position: THREE.Vector3;
-    private direction: THREE.Vector3;
-    private carGroup: THREE.Group;
-    private contactShadow: THREE.Mesh;
-    private contactShadowTexture: THREE.Texture;
-    private contactShadowMaterial: THREE.MeshBasicMaterial;
-    private mapBuilder: MapBuilder;
-    private isOnTrack = true;
-    private trailSystem: TrailSystem;
-    private isDrifting = false;
-    private lastTrailTime = 0;
-    private elapsedTime = 0;
-    private readonly TRAIL_SPAWN_INTERVAL: number = 0.05;
-    private driftIntensity = 0;
-    private wasTrailing = false;
+    private readonly root: THREE.Group;
+    private readonly model: CarModel;
+    private readonly physics = new CarPhysics();
+    private readonly trails: TrailSystem;
+    private readonly particles: ParticleSystem;
+    private readonly mapBuilder: MapBuilder;
+    private readonly input: InputManager;
+
+    private readonly position = new THREE.Vector3();
+    private readonly direction = new THREE.Vector3(0, 0, 1);
     private heading = 0;
 
-    // Collision detection
-    private collisionRaycaster: THREE.Raycaster;
-    private readonly collisionDistance = 0.8;
-    private readonly collisionBroadPhasePadding = 4;
-    private readonly mapRadius = 100;
-    private verticalVelocity = 0; // For gravity/jumping effects
-    private readonly GRAVITY = 20.0; // Gravity constant
-    private isGrounded = true;
+    private verticalVelocity = 0;
+    private grounded = true;
     private airborneTime = 0;
-    private collisionObjects: THREE.Object3D[] = [];
-    private groundMesh: THREE.Mesh | null = null;
-    private trackMesh: THREE.Mesh | null = null;
+    private previousGroundHeight = 0;
+    private hasPreviousGround = false;
 
-    // Physics-based terrain following
-    private readonly wheelPositions = [
-        { x: 0.45, y: 0, z: 0.6 },   // Front right
-        { x: -0.45, y: 0, z: 0.6 },  // Front left
-        { x: 0.45, y: 0, z: -0.6 },  // Rear right
-        { x: -0.45, y: 0, z: -0.6 }, // Rear left
-    ];
-    private readonly chassisToGroundRest = 0.15;   // Target chassis height above ground
+    private bodyPitch = 0;
+    private bodyRoll = 0;
+    private dynamicPitch = 0;
+    private dynamicRoll = 0;
+    private previousSpeed = 0;
 
-    // Reusable temp objects to avoid per-frame allocations
-    private readonly _tmpVec3A = new THREE.Vector3();
-    private readonly _tmpVec3B = new THREE.Vector3();
-    private readonly _tmpVec3C = new THREE.Vector3();
-    private readonly _tmpQuatA = new THREE.Quaternion();
-    private readonly _tmpEuler = new THREE.Euler();
-    private readonly _upVector = new THREE.Vector3(0, 1, 0);
-    private readonly _collisionOrigin = new THREE.Vector3();
-    private readonly _collisionPoint = new THREE.Vector3();
-    private readonly _collisionHits: THREE.Intersection[] = [];
-    private readonly _collisionResult = {
-        hasCollision: false,
-        collisionPoint: this._collisionPoint,
-    };
-    private readonly _trailGroundPoint = new THREE.Vector3();
-    private readonly _inputState: CarInput = {
-        forward: false,
-        backward: false,
-        left: false,
-        right: false,
-        brake: false,
-        drift: false,
-    };
-    private readonly _collisionDirs: THREE.Vector3[] = [
-        new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()
-    ];
-    private readonly _worldWheelPositions: THREE.Vector3[] = [
-        new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()
-    ];
+    private onTrack = true;
+    private elapsed = 0;
+    private dustAccumulator = 0;
+    private trailAccumulator = 0;
+    private wasTrailing = false;
+
+    private readonly wheelGroundHeights = [0, 0, 0, 0];
+    private readonly suspension = [0, 0, 0, 0];
+
+    private readonly driveInput: CarInput = { throttle: 0, steer: 0, handbrake: false, boost: false };
+
+    private readonly _wheelWorld = new THREE.Vector3();
+    private readonly _nextPosition = new THREE.Vector3();
+    private readonly _trailPoint = new THREE.Vector3();
+    private readonly _euler = new THREE.Euler(0, 0, 0, "YXZ");
 
     constructor(
         scene: THREE.Scene,
-        inputManager: InputManager,
+        input: InputManager,
         mapBuilder: MapBuilder,
+        particles: ParticleSystem,
     ) {
-        this.inputManager = inputManager;
+        this.input = input;
         this.mapBuilder = mapBuilder;
+        this.particles = particles;
 
-        // Create car group to hold all car parts
-        this.carGroup = new THREE.Group();
-        scene.add(this.carGroup);
+        this.root = new THREE.Group();
+        this.root.rotation.order = "YXZ";
+        scene.add(this.root);
 
-        // Initialize car model
-        this.carModel = new CarModel(this.carGroup);
-        const contactShadow = this.createContactShadow(scene);
-        this.contactShadow = contactShadow.mesh;
-        this.contactShadowTexture = contactShadow.texture;
-        this.contactShadowMaterial = contactShadow.material;
+        this.model = new CarModel(this.root);
+        this.trails = new TrailSystem(scene);
 
-        // Initialize car physics
-        this.carPhysics = new CarPhysics();
-
-        // Get start position from the map builder
-        const startPosition = mapBuilder.getStartPosition();
-        const startDirection = mapBuilder.getStartDirection();
-
-        // Set initial position and direction using the track's start position
-        const startSurfaceHeight = mapBuilder.getSurfaceHeightAt(startPosition.x, startPosition.z);
-        this.position = new THREE.Vector3(
-            startPosition.x,
-            startSurfaceHeight + this.chassisToGroundRest,
-            startPosition.z
-        );
-        this.direction = new THREE.Vector3(startDirection.x, 0, startDirection.z).normalize();
-
-        // Set initial car rotation to face along the track
-        this.heading = Math.atan2(startDirection.x, startDirection.z);
-        this.carGroup.rotation.y = this.heading;
-
-        // Initialize raycaster for collision detection
-        this.collisionRaycaster = new THREE.Raycaster();
-        this.collisionRaycaster.far = this.collisionDistance;
-
-        // Initialize trail system
-        this.trailSystem = new TrailSystem(scene);
-        this.trailSystem.setTrackSurfaceTest((x, z) => this.mapBuilder.isPointOnTrack(x, z));
-
-        // Tell the TrailSystem which object is the track (for color differentiation)
-        const trackMesh = mapBuilder.getTrackMesh();
-        if (trackMesh) {
-            this.trailSystem.setTrackObjects([trackMesh]);
-            this.trackMesh = trackMesh;
-        }
-
-        // Store ground mesh for height calculations
-        this.groundMesh = mapBuilder.getGroundMesh();
-
-        // Get all objects to check collisions against (excluding ground and track)
-        this.collisionObjects = mapBuilder.getTerrainObjects().filter(obj => {
-            // Filter out the ground and track meshes
-            return obj !== this.groundMesh && obj !== this.trackMesh && obj.userData.nonCollidable !== true;
-        });
-
-        // Initial position update
-        this.updatePosition();
-        this.updateContactShadow();
+        this.resetToStart();
     }
 
-    public update(deltaTime: number): void {
-        // Clamp deltaTime to avoid physics instability with large time steps
-        const dt = THREE.MathUtils.clamp(deltaTime, 0, 0.03);
-        this.elapsedTime += dt;
+    public resetToStart(): void {
+        const start = this.mapBuilder.getStartPosition();
+        const startDirection = this.mapBuilder.getStartDirection();
+        this.placeAt(start.x, start.z, Math.atan2(startDirection.x, startDirection.z));
+        this.trails.clear();
+    }
 
-        const input = this._inputState;
-        input.forward =
-            this.inputManager.isKeyPressed("q") ||
-            this.inputManager.isKeyPressed("ArrowUp");
-        input.backward =
-            this.inputManager.isKeyPressed("a") ||
-            this.inputManager.isKeyPressed("ArrowDown");
-        input.left =
-            this.inputManager.isKeyPressed("o") ||
-            this.inputManager.isKeyPressed("ArrowLeft");
-        input.right =
-            this.inputManager.isKeyPressed("p") ||
-            this.inputManager.isKeyPressed("ArrowRight");
-        input.brake = false;
-        input.drift = this.inputManager.isKeyPressed(" ");
+    /** Drops the car back onto the racing line at its current point on the lap. */
+    public respawn(): number {
+        const query = this.mapBuilder.queryTrack(this.position.x, this.position.z);
+        const sample = this.mapBuilder.getTrackPath().sampleAt(query.t);
+        this.placeAt(sample.x, sample.z, Math.atan2(sample.tangentX, sample.tangentZ));
+        this.trails.breakAllTrails();
+        return query.t;
+    }
 
-        // Check if car is on track
-        this.checkIfOnTrack();
+    private placeAt(x: number, z: number, heading: number): void {
+        this.heading = heading;
+        this.direction.set(Math.sin(heading), 0, Math.cos(heading));
+        this.position.set(x, this.mapBuilder.getSurfaceHeightAt(x, z), z);
 
-        // Update physics based on input
-        this.carPhysics.update(dt, input, !this.isOnTrack);
+        this.physics.reset();
+        this.verticalVelocity = 0;
+        this.grounded = true;
+        this.airborneTime = 0;
+        this.hasPreviousGround = false;
+        this.bodyPitch = 0;
+        this.bodyRoll = 0;
+        this.dynamicPitch = 0;
+        this.dynamicRoll = 0;
+        this.previousSpeed = 0;
+        this.suspension.fill(0);
 
-        // Apply physics to car position and rotation
-        const velocity = this.carPhysics.getVelocity();
-        const lateralVelocity = this.carPhysics.getLateralVelocity();
+        this.root.position.copy(this.position);
+        this.root.rotation.set(0, heading, 0);
+        this.model.setSuspension(this.suspension);
+        this.model.setSteering(0);
+    }
 
-        // Apply yaw rate to car rotation
-        const yawRate = this.carPhysics.getYawRate();
-        this.heading += yawRate * dt;
-        this.carGroup.rotation.y = this.heading;
+    public update(deltaTime: number, canDrive: boolean): void {
+        this.elapsed += deltaTime;
 
-        // Update direction vector from current heading
-        this.direction.x = Math.sin(this.heading);
-        this.direction.z = Math.cos(this.heading);
+        this.readInput(canDrive);
+        this.onTrack = this.mapBuilder.isPointOnTrack(this.position.x, this.position.z);
 
-        // Create a lateral direction vector (perpendicular to main direction)
-        const lateralDirection = this._tmpVec3A.set(
-            -this.direction.z,
-            0,
-            this.direction.x
+        const surface = this.resolveSurface();
+        this.physics.update(deltaTime, this.driveInput, surface);
+
+        this.integrateHeading(deltaTime);
+        this.integrateHorizontal(deltaTime);
+        this.resolveObstacles();
+        this.resolveBoundary();
+        this.integrateVertical(deltaTime);
+        this.updateSuspension(deltaTime);
+        this.updateBodyAttitude(deltaTime);
+        this.applyTransform();
+
+        this.updateModelState(deltaTime);
+        this.spawnEffects(deltaTime);
+        this.trails.update(deltaTime);
+    }
+
+    private readInput(canDrive: boolean): void {
+        const sampled = this.input.sample();
+
+        if (canDrive) {
+            this.driveInput.throttle = sampled.throttle;
+            this.driveInput.steer = sampled.steer;
+            this.driveInput.handbrake = sampled.handbrake;
+            this.driveInput.boost = sampled.boost;
+        } else {
+            // During the countdown the wheels can be turned but the car stays put.
+            this.driveInput.throttle = 0;
+            this.driveInput.steer = sampled.steer;
+            this.driveInput.handbrake = true;
+            this.driveInput.boost = false;
+        }
+    }
+
+    private resolveSurface(): SurfaceState {
+        if (this.onTrack) return TRACK_SURFACE;
+        return GRASS_SURFACE;
+    }
+
+    private integrateHeading(deltaTime: number): void {
+        this.heading += this.physics.getYawRate() * deltaTime;
+        this.direction.set(Math.sin(this.heading), 0, Math.cos(this.heading));
+    }
+
+    private integrateHorizontal(deltaTime: number): void {
+        const velocity = this.physics.getVelocity();
+        const lateral = this.physics.getLateralVelocity();
+
+        // Local right vector for the sideways slip component.
+        const rightX = -this.direction.z;
+        const rightZ = this.direction.x;
+
+        this._nextPosition.set(
+            this.position.x + (this.direction.x * velocity + rightX * lateral) * deltaTime,
+            this.position.y,
+            this.position.z + (this.direction.z * velocity + rightZ * lateral) * deltaTime,
         );
 
-        // Calculate new position with both forward velocity and lateral slide
-        const newPosition = this._tmpVec3B.copy(this.position);
+        this.position.x = this._nextPosition.x;
+        this.position.z = this._nextPosition.z;
+    }
 
-        // Apply forward velocity
-        newPosition.x += this.direction.x * velocity * dt;
-        newPosition.z += this.direction.z * velocity * dt;
+    private resolveObstacles(): void {
+        const groundHeight = this.mapBuilder.getSurfaceHeightAt(this.position.x, this.position.z);
+        const carBottom = this.position.y - groundHeight;
 
-        // Apply lateral velocity from tire slip
-        if (Math.abs(lateralVelocity) > 0.05) {
-            newPosition.x += lateralDirection.x * lateralVelocity * dt;
-            newPosition.z += lateralDirection.z * lateralVelocity * dt;
-        }
+        const cosHeading = Math.cos(this.heading);
+        const sinHeading = Math.sin(this.heading);
+        const speed = Math.abs(this.physics.getVelocity());
 
-        // Check for collision with obstacles
-        const collisionResult = this.checkCollisions(newPosition);
+        this.mapBuilder.forEachObstacleNear(this.position.x, this.position.z, 3.5, (obstacle) => {
+            // Flying over the top of something is not a collision.
+            if (carBottom > obstacle.height) return;
 
-        // Apply position update based on collision result
-        if (!collisionResult.hasCollision) {
-            // No collision, can update position
-            this.position.copy(newPosition);
-        } else {
-            // On collision, bounce back and reduce speed
-            this.carPhysics.reverseVelocity(0.5);
+            const dx = obstacle.x - this.position.x;
+            const dz = obstacle.z - this.position.z;
 
-            // Apply a bounce effect - push away from collision point
-            const pushDirection = this._tmpVec3C.subVectors(this.position, collisionResult.collisionPoint).normalize();
-            pushDirection.y = 0; // Keep on horizontal plane
+            // Into car space so the hull can be treated as a rounded box.
+            const localX = dx * cosHeading - dz * sinHeading;
+            const localZ = dx * sinHeading + dz * cosHeading;
 
-            // Apply push based on speed at impact
-            const pushForce = Math.abs(velocity) * 0.05;
-            this.position.x += pushDirection.x * pushForce;
-            this.position.z += pushDirection.z * pushForce;
-        }
+            const closestX = THREE.MathUtils.clamp(localX, -CAR_HALF_WIDTH, CAR_HALF_WIDTH);
+            const closestZ = THREE.MathUtils.clamp(localZ, -CAR_HALF_LENGTH, CAR_HALF_LENGTH);
 
-        // Check if position is within map boundaries
-        if (!this.isPositionValid(this.position)) {
-            // Bounce off map boundaries
-            this.carPhysics.reverseVelocity(0.5);
-            this.position.x = THREE.MathUtils.clamp(this.position.x, -this.mapRadius, this.mapRadius);
-            this.position.z = THREE.MathUtils.clamp(this.position.z, -this.mapRadius, this.mapRadius);
-        }
+            const offsetX = localX - closestX;
+            const offsetZ = localZ - closestZ;
+            const distanceSq = offsetX * offsetX + offsetZ * offsetZ;
+            const reach = obstacle.radius;
 
-        // Apply gravity and vertical motion
-        this.applyGravity(dt);
+            if (distanceSq >= reach * reach) return;
 
-        const isDrifting = this.carPhysics.isDrifting();
-        const driftFactor = this.carPhysics.getDriftFactor();
-        const slipAngle = this.carPhysics.getSlipAngle();
+            const distance = Math.sqrt(distanceSq);
+            let normalLocalX: number;
+            let normalLocalZ: number;
 
-        // Apply visual tilt based on slip angle and lateral velocity
-        if (Math.abs(slipAngle) > 0.02 && Math.abs(velocity) > 3) {
-            const rollTarget = -Math.sign(lateralVelocity) * Math.min(Math.abs(lateralVelocity * 0.04), 0.18);
-            const pitchTarget = driftFactor * 0.02;
-            const tiltBlend = 1 - Math.exp(-12 * dt);
-
-            this.carGroup.rotation.z += (rollTarget - this.carGroup.rotation.z) * tiltBlend;
-            this.carGroup.rotation.x += (pitchTarget - this.carGroup.rotation.x) * tiltBlend;
-        } else {
-            const levelBlend = 1 - Math.exp(-9 * dt);
-            this.carGroup.rotation.z += (0 - this.carGroup.rotation.z) * levelBlend;
-            this.carGroup.rotation.x += (0 - this.carGroup.rotation.x) * levelBlend;
-        }
-
-        // Update car wheels rotation based on velocity
-        this.carModel.updateWheelRotation(velocity * dt);
-
-        // Apply physics-based terrain following only when on ground
-        if (this.isGrounded) {
-            this.applyTerrainPhysics(dt);
-        } else {
-            // Apply airborne tilt and orientation
-            this.applyAirborneRotation(dt);
-        }
-
-        // Update car position and rotation
-        this.updatePosition();
-
-        // Handle drifting effects
-        const speed = Math.abs(velocity);
-
-        // Update drift state based on slip angle and lateral velocity
-        this.isDrifting = isDrifting && speed > 5;
-        this.driftIntensity = Math.max(
-            driftFactor,
-            Math.min(1.0, Math.abs(lateralVelocity) / 8.0)
-        );
-
-        const hasSlide = Math.abs(slipAngle) > 0.03 || Math.abs(lateralVelocity) > 0.8;
-        const shouldTrail = (this.isDrifting || hasSlide) && speed > 3 && this.isGrounded;
-
-        if (shouldTrail) {
-            if (this.elapsedTime - this.lastTrailTime > this.TRAIL_SPAWN_INTERVAL) {
-                this.createDriftTrails();
-                this.lastTrailTime = this.elapsedTime;
+            if (distance > 1e-4) {
+                normalLocalX = -offsetX / distance;
+                normalLocalZ = -offsetZ / distance;
+            } else {
+                // Dead centre: push out along the shallower axis.
+                normalLocalX = Math.abs(localX) > Math.abs(localZ) ? -Math.sign(localX) : 0;
+                normalLocalZ = normalLocalX === 0 ? -Math.sign(localZ) || 1 : 0;
             }
-        } else if (this.wasTrailing) {
-            this.trailSystem.breakAllTrails();
-        }
-        this.wasTrailing = shouldTrail;
 
-        // Update trail system
-        this.trailSystem.update(dt);
+            const penetration = reach - distance;
+
+            // Back to world space (inverse of the rotation applied above).
+            const normalX = normalLocalX * cosHeading + normalLocalZ * sinHeading;
+            const normalZ = -normalLocalX * sinHeading + normalLocalZ * cosHeading;
+
+            const push = penetration * (0.35 + obstacle.solidity * 0.65);
+            this.position.x += normalX * push;
+            this.position.z += normalZ * push;
+
+            const approach = -(this.direction.x * normalX + this.direction.z * normalZ);
+            const severity = THREE.MathUtils.clamp(
+                Math.max(0, approach) * (speed / 26) * obstacle.solidity,
+                0,
+                1,
+            );
+
+            if (severity > 0.02) {
+                this.physics.applyImpact(severity);
+                this.emitImpactDebris(normalX, normalZ, severity);
+            } else if (obstacle.solidity < 0.3) {
+                this.physics.scrubSpeed(0.985);
+            }
+        });
     }
 
-    private applyGravity(dt: number): void {
-        // Check if the car is on ground
-        this.isGrounded = this.checkGrounded();
+    private resolveBoundary(): void {
+        const distance = Math.hypot(this.position.x, this.position.z);
+        if (distance <= BOUNDARY_RADIUS) return;
 
-        if (this.isGrounded) {
-            // Reset vertical velocity when grounded
-            this.verticalVelocity = 0;
+        const scale = BOUNDARY_RADIUS / distance;
+        this.position.x *= scale;
+        this.position.z *= scale;
+        this.physics.scrubSpeed(0.82);
+    }
+
+    private integrateVertical(deltaTime: number): void {
+        const groundHeight = this.sampleWheelGround();
+
+        const terrainRate = this.hasPreviousGround
+            ? THREE.MathUtils.clamp((groundHeight - this.previousGroundHeight) / Math.max(deltaTime, 1e-4), -34, 34)
+            : 0;
+        this.previousGroundHeight = groundHeight;
+        this.hasPreviousGround = true;
+
+        this.verticalVelocity -= GRAVITY * deltaTime;
+        this.position.y += this.verticalVelocity * deltaTime;
+
+        if (this.position.y <= groundHeight) {
+            if (!this.grounded && this.verticalVelocity < -6) {
+                this.handleLanding(-this.verticalVelocity, groundHeight);
+            }
+
+            this.position.y = groundHeight;
+            // Riding the surface: vertical speed simply matches how fast the ground rises or falls.
+            this.verticalVelocity = terrainRate;
+            this.grounded = true;
             this.airborneTime = 0;
         } else {
-            // Apply gravity when in air
-            this.verticalVelocity -= this.GRAVITY * dt;
-            this.airborneTime += dt;
+            this.grounded = false;
+            this.airborneTime += deltaTime;
 
-            // Apply vertical velocity to position
-            this.position.y += this.verticalVelocity * dt;
-
-            // Check if we've landed
-            if (this.checkGrounded()) {
-                this.isGrounded = true;
-
-                // Calculate landing impact
-                const impactForce = Math.abs(this.verticalVelocity);
-
-                // If it's a hard landing, apply some bounce
-                if (impactForce > 5) {
-                    const bounceReduction = 0.3; // Reduce bounce for softer landing
-                    this.verticalVelocity = impactForce * bounceReduction;
-
-                    // Reduce horizontal velocity based on impact
-                    const currentSpeed = this.carPhysics.getVelocity();
-                    if (Math.abs(currentSpeed) > 0.5) {
-                        this.carPhysics.reverseVelocity(0.2);
-                    }
-                } else {
-                    // Soft landing
-                    this.verticalVelocity = 0;
-                }
+            // A long jump is worth a sliver of boost.
+            if (this.airborneTime > 0.35) {
+                this.physics.addBoostCharge(deltaTime * 0.18);
             }
         }
     }
 
-    private checkGrounded(): boolean {
-        const surfaceHeight = this.mapBuilder.getSurfaceHeightAt(this.position.x, this.position.z);
-        return this.position.y - surfaceHeight < 0.65;
-    }
+    private handleLanding(impactSpeed: number, groundHeight: number): void {
+        const severity = THREE.MathUtils.clamp((impactSpeed - 6) / 16, 0, 1);
+        this.physics.scrubSpeed(1 - severity * 0.22);
+        this.dynamicPitch += severity * 0.16;
 
-    private applyAirborneRotation(dt: number): void {
-        // Gradually rotate the car to be level when in air
-        if (this.airborneTime > 0.2) { // Only start leveling after a short time in air
-            // Calculate target rotation to level out
-            const targetRotation = this._tmpQuatA.setFromEuler(
-                this._tmpEuler.set(0, this.heading, 0)
+        const color = this.onTrack ? DUST_TRACK : DUST_GRASS;
+        const count = Math.round(6 + severity * 14);
+
+        for (let i = 0; i < count; i++) {
+            const angle = (i / count) * Math.PI * 2;
+            const spread = 1.4 + Math.random() * 2.4;
+            this.particles.emit(
+                this.position.x + Math.cos(angle) * 0.5,
+                groundHeight + 0.08,
+                this.position.z + Math.sin(angle) * 0.5,
+                Math.cos(angle) * spread,
+                1 + Math.random() * 1.6,
+                Math.sin(angle) * spread,
+                {
+                    color,
+                    size: 0.4 + Math.random() * 0.4,
+                    sizeGrowth: 2.4,
+                    life: 0.5 + Math.random() * 0.5,
+                    gravity: 2.2,
+                    drag: 2.4,
+                    alpha: 0.4 + severity * 0.25,
+                },
             );
-
-            // Smoothly interpolate current rotation towards level
-            const smoothingFactor = 1 - Math.exp(-5 * dt);
-            this.carGroup.quaternion.slerp(targetRotation, smoothingFactor);
         }
     }
 
-    private checkCollisions(newPosition: THREE.Vector3): { hasCollision: boolean, collisionPoint: THREE.Vector3 } {
-        this._collisionResult.hasCollision = false;
+    private sampleWheelGround(): number {
+        let total = 0;
 
-        if (this.collisionObjects.length === 0) {
-            return this._collisionResult;
+        for (let i = 0; i < WHEEL_POSITIONS.length; i++) {
+            const wheel = WHEEL_POSITIONS[i];
+            this.localToWorldXZ(wheel.x, wheel.z, this._wheelWorld);
+            const height = this.mapBuilder.getSurfaceHeightAt(this._wheelWorld.x, this._wheelWorld.z);
+            this.wheelGroundHeights[i] = height;
+            total += height;
         }
 
-        // Check collision with each object in collision list
-        let nearestCollision = Infinity;
+        return total / WHEEL_POSITIONS.length;
+    }
 
-        // Check collisions in multiple directions for better coverage
-        this._collisionDirs[0].copy(this.direction); // Forward
-        this._collisionDirs[1].set(-this.direction.x, 0, -this.direction.z); // Backward
-        this._collisionDirs[2].set(-this.direction.z, 0, this.direction.x); // Left
-        this._collisionDirs[3].set(this.direction.z, 0, -this.direction.x); // Right
-        this._collisionOrigin.set(newPosition.x, newPosition.y + 0.3, newPosition.z);
+    private localToWorldXZ(localX: number, localZ: number, out: THREE.Vector3): void {
+        const cos = Math.cos(this.heading);
+        const sin = Math.sin(this.heading);
+        out.set(
+            this.position.x + localX * cos + localZ * sin,
+            0,
+            this.position.z - localX * sin + localZ * cos,
+        );
+    }
 
-        for (const direction of this._collisionDirs) {
-            this.collisionRaycaster.set(
-                this._collisionOrigin,
-                direction
-            );
+    private updateSuspension(deltaTime: number): void {
+        const [frontRight, frontLeft, rearRight, rearLeft] = this.wheelGroundHeights;
+        const average = (frontRight + frontLeft + rearRight + rearLeft) / 4;
 
-            for (const object of this.collisionObjects) {
-                const dx = object.position.x - newPosition.x;
-                const dz = object.position.z - newPosition.z;
-                const userRadius = object.userData.radius;
-                const radius = (typeof userRadius === "number" ? userRadius : 4) + this.collisionBroadPhasePadding;
+        const pitchSlope = (frontRight + frontLeft - rearRight - rearLeft) / (4 * WHEEL_BASE);
+        const rollSlope = (frontRight + rearRight - frontLeft - rearLeft) / (4 * TRACK_HALF_WIDTH);
 
-                if (dx * dx + dz * dz > radius * radius) continue;
+        const blend = 1 - Math.exp(-16 * deltaTime);
 
-                this.collisionRaycaster.intersectObject(object, true, this._collisionHits);
+        for (let i = 0; i < WHEEL_POSITIONS.length; i++) {
+            const wheel = WHEEL_POSITIONS[i];
+            const planeHeight = average + pitchSlope * wheel.z + rollSlope * wheel.x;
+            const residual = this.grounded
+                ? THREE.MathUtils.clamp(this.wheelGroundHeights[i] - planeHeight, -MAX_SUSPENSION_TRAVEL, MAX_SUSPENSION_TRAVEL)
+                : -MAX_SUSPENSION_TRAVEL * 0.55;
 
-                if (this._collisionHits.length > 0 && this._collisionHits[0].distance < nearestCollision) {
-                    nearestCollision = this._collisionHits[0].distance;
-                    this._collisionPoint.copy(this._collisionHits[0].point);
-                    this._collisionResult.hasCollision = true;
-                }
+            this.suspension[i] += (residual - this.suspension[i]) * blend;
+        }
 
-                this._collisionHits.length = 0;
+        this.model.setSuspension(this.suspension);
+
+        if (this.grounded) {
+            // Nose up when climbing, nose down when descending.
+            const targetPitch = -Math.atan(pitchSlope);
+            const targetRoll = Math.atan(rollSlope);
+            const terrainBlend = 1 - Math.exp(-12 * deltaTime);
+            this.bodyPitch += (targetPitch - this.bodyPitch) * terrainBlend;
+            this.bodyRoll += (targetRoll - this.bodyRoll) * terrainBlend;
+        } else {
+            const airBlend = 1 - Math.exp(-2.6 * deltaTime);
+            this.bodyPitch += (-0.12 - this.bodyPitch) * airBlend;
+            this.bodyRoll += (0 - this.bodyRoll) * airBlend;
+        }
+    }
+
+    private updateBodyAttitude(deltaTime: number): void {
+        const speed = this.physics.getVelocity();
+        const acceleration = (speed - this.previousSpeed) / Math.max(deltaTime, 1e-4);
+        this.previousSpeed = speed;
+
+        // Weight transfer: squat under power, dive under braking, lean out of corners.
+        const targetPitch = THREE.MathUtils.clamp(-acceleration * 0.0022, -0.07, 0.07);
+        const targetRoll = THREE.MathUtils.clamp(this.physics.getLateralVelocity() * 0.017, -0.16, 0.16);
+
+        const blend = 1 - Math.exp(-9 * deltaTime);
+        this.dynamicPitch += (targetPitch - this.dynamicPitch) * blend;
+        this.dynamicRoll += (targetRoll - this.dynamicRoll) * blend;
+    }
+
+    private applyTransform(): void {
+        this.root.position.copy(this.position);
+        this._euler.set(
+            this.bodyPitch + this.dynamicPitch,
+            this.heading,
+            this.bodyRoll + this.dynamicRoll,
+            "YXZ",
+        );
+        this.root.rotation.copy(this._euler);
+    }
+
+    private updateModelState(deltaTime: number): void {
+        const velocity = this.physics.getVelocity();
+
+        this.model.setSteering(this.physics.getSteeringAngle() * 3.4);
+        this.model.spinWheels(this.grounded ? velocity * deltaTime : velocity * deltaTime * 0.4);
+
+        const braking = this.driveInput.throttle < -0.05 && velocity > 1;
+        const handbraking = this.driveInput.handbrake && Math.abs(velocity) > 1;
+        this.model.setBrakeLights(braking || handbraking ? 1 : 0);
+        this.model.setReverseLights(velocity < -0.5);
+        this.model.setBoost(this.physics.isBoosting() ? 1 : 0, this.elapsed);
+        this.model.setHeadlights(1.4 + this.physics.getEngineLoad() * 0.6);
+    }
+
+    private spawnEffects(deltaTime: number): void {
+        const speed = Math.abs(this.physics.getVelocity());
+        const slip = Math.abs(this.physics.getLateralVelocity());
+        const drifting = this.physics.isDrifting();
+        const intensity = THREE.MathUtils.clamp(Math.max(this.physics.getDriftFactor(), slip / 6), 0, 1);
+
+        const laying = this.grounded && speed > 3 && (drifting || slip > 0.9 || (!this.onTrack && speed > 8));
+
+        if (laying) {
+            this.trailAccumulator += deltaTime;
+            if (this.trailAccumulator > 0.016) {
+                this.trailAccumulator = 0;
+                this.layTrails(intensity);
             }
+            this.wasTrailing = true;
+        } else if (this.wasTrailing) {
+            this.trails.breakAllTrails();
+            this.wasTrailing = false;
         }
 
-        return this._collisionResult;
-    }
-
-    private getWorldWheelPosition(localPos: { x: number, y: number, z: number }, index: number): THREE.Vector3 {
-        const wheelPos = this._worldWheelPositions[index];
-        wheelPos.set(localPos.x, localPos.y, localPos.z);
-        wheelPos.applyAxisAngle(this._upVector, this.heading);
-        wheelPos.add(this.position);
-        return wheelPos;
-    }
-
-    private applyTerrainPhysics(dt: number): void {
-        let averageGroundHeight = 0;
-
-        for (let i = 0; i < this.wheelPositions.length; i++) {
-            const wheelPos = this.getWorldWheelPosition(this.wheelPositions[i], i);
-            const groundHeight = this.mapBuilder.getSurfaceHeightAt(wheelPos.x, wheelPos.z);
-            averageGroundHeight += groundHeight;
+        const wantsDust = this.grounded && speed > 6 && (laying || !this.onTrack || this.physics.isBoosting());
+        if (!wantsDust) {
+            this.dustAccumulator = 0;
+            return;
         }
 
-        averageGroundHeight /= this.wheelPositions.length;
-        const targetHeight = averageGroundHeight + this.chassisToGroundRest;
-        const heightBlend = 1 - Math.exp(-14 * dt);
-        this.position.y += (targetHeight - this.position.y) * heightBlend;
+        const rate = 40 + intensity * 90 + (this.physics.isBoosting() ? 40 : 0);
+        this.dustAccumulator += deltaTime * rate;
+
+        while (this.dustAccumulator >= 1) {
+            this.dustAccumulator -= 1;
+            this.emitWheelDust(intensity, speed);
+        }
     }
 
-    private isPositionValid(position: THREE.Vector3): boolean {
-        // Check if position is within map boundaries
-        return (
-            position.x >= -this.mapRadius &&
-            position.x <= this.mapRadius &&
-            position.z >= -this.mapRadius &&
-            position.z <= this.mapRadius
-        );
-    }
+    private layTrails(intensity: number): void {
+        const sin = Math.sin(this.heading);
+        const cos = Math.cos(this.heading);
 
-    private checkIfOnTrack(): void {
-        // Check if car is on the track
-        this.isOnTrack = this.mapBuilder.isPointOnTrack(
-            this.position.x,
-            this.position.z,
-        );
-    }
+        for (let i = 2; i < WHEEL_POSITIONS.length; i++) {
+            const wheel = WHEEL_POSITIONS[i];
+            this.localToWorldXZ(wheel.x, wheel.z, this._wheelWorld);
 
-    private updatePosition(): void {
-        this.carGroup.position.copy(this.position);
-        this.updateContactShadow();
-    }
-
-    private createContactShadow(scene: THREE.Scene): {
-        mesh: THREE.Mesh;
-        texture: THREE.Texture;
-        material: THREE.MeshBasicMaterial;
-    } {
-        const size = 128;
-        const canvas = document.createElement("canvas");
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext("2d")!;
-        const gradient = ctx.createRadialGradient(
-            size / 2,
-            size / 2,
-            size * 0.08,
-            size / 2,
-            size / 2,
-            size * 0.5,
-        );
-        gradient.addColorStop(0, "rgba(0, 0, 0, 0.34)");
-        gradient.addColorStop(0.55, "rgba(0, 0, 0, 0.18)");
-        gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
-        ctx.fillStyle = gradient;
-        ctx.fillRect(0, 0, size, size);
-
-        const texture = new THREE.CanvasTexture(canvas);
-        const material = new THREE.MeshBasicMaterial({
-            map: texture,
-            transparent: true,
-            depthWrite: false,
-            depthTest: true,
-            opacity: 0.65,
-        });
-        const geometry = new THREE.CircleGeometry(0.85, 48);
-        const mesh = new THREE.Mesh(geometry, material);
-        mesh.rotation.x = -Math.PI / 2;
-        mesh.scale.set(0.85, 1.25, 1);
-        mesh.renderOrder = 20;
-        scene.add(mesh);
-
-        return { mesh, texture, material };
-    }
-
-    private updateContactShadow(): void {
-        const surfaceHeight = this.mapBuilder.getSurfaceHeightAt(this.position.x, this.position.z);
-        this.contactShadow.position.set(
-            this.position.x,
-            surfaceHeight + 0.04,
-            this.position.z,
-        );
-        this.contactShadow.rotation.y = this.heading;
-        this.contactShadowMaterial.opacity = this.isGrounded ? 0.65 : 0.25;
-    }
-
-    private readonly _rearWheels = [
-        { x: 0.48, y: 0.05, z: -0.55, id: "rear-right" },
-        { x: -0.48, y: 0.05, z: -0.55, id: "rear-left" },
-    ];
-
-    private createDriftTrails(): void {
-        if (!this.isGrounded) return;
-
-        for (const wheelPos of this._rearWheels) {
-            const worldPos = this.carGroup.localToWorld(
-                this._tmpVec3A.set(wheelPos.x, wheelPos.y, wheelPos.z),
+            const onTrack = this.mapBuilder.isPointOnTrack(this._wheelWorld.x, this._wheelWorld.z);
+            this._trailPoint.set(
+                this._wheelWorld.x,
+                this.mapBuilder.getSurfaceHeightAt(this._wheelWorld.x, this._wheelWorld.z) + 0.02,
+                this._wheelWorld.z,
             );
 
-            this._trailGroundPoint.set(
-                worldPos.x,
-                this.mapBuilder.getSurfaceHeightAt(worldPos.x, worldPos.z) + 0.02,
-                worldPos.z,
-            );
+            this.trails.addMark(`wheel-${i}`, this._trailPoint, sin, cos, onTrack, intensity);
+        }
+    }
 
-            this.trailSystem.addTrail(
-                this._trailGroundPoint,
-                this.heading,
-                undefined,
-                wheelPos.id,
-                0.08,
-                this.driftIntensity,
+    private emitWheelDust(intensity: number, speed: number): void {
+        const wheelIndex = 2 + (Math.random() > 0.5 ? 1 : 0);
+        const wheel = WHEEL_POSITIONS[wheelIndex];
+        this.localToWorldXZ(wheel.x, wheel.z, this._wheelWorld);
+
+        const surfaceHeight = this.mapBuilder.getSurfaceHeightAt(this._wheelWorld.x, this._wheelWorld.z);
+        const onTrack = this.mapBuilder.isPointOnTrack(this._wheelWorld.x, this._wheelWorld.z);
+
+        const backX = -this.direction.x;
+        const backZ = -this.direction.z;
+        const spray = 1.5 + intensity * 5 + speed * 0.09;
+
+        this.particles.emit(
+            this._wheelWorld.x + (Math.random() - 0.5) * 0.2,
+            surfaceHeight + 0.1,
+            this._wheelWorld.z + (Math.random() - 0.5) * 0.2,
+            backX * spray + (Math.random() - 0.5) * 2.2,
+            0.8 + Math.random() * 1.5 + intensity * 1.2,
+            backZ * spray + (Math.random() - 0.5) * 2.2,
+            {
+                color: onTrack ? DUST_TRACK : DUST_GRASS,
+                size: 0.34 + Math.random() * 0.4 + intensity * 0.35,
+                sizeGrowth: 3.4,
+                life: 0.5 + Math.random() * 0.6,
+                gravity: 1.1,
+                drag: 2.1,
+                alpha: 0.3 + intensity * 0.35,
+            },
+        );
+    }
+
+    private emitImpactDebris(normalX: number, normalZ: number, severity: number): void {
+        const count = Math.round(3 + severity * 12);
+        const groundHeight = this.mapBuilder.getSurfaceHeightAt(this.position.x, this.position.z);
+
+        for (let i = 0; i < count; i++) {
+            const spread = 2 + Math.random() * 5 * severity;
+            this.particles.emit(
+                this.position.x - normalX * 0.8,
+                groundHeight + 0.3 + Math.random() * 0.3,
+                this.position.z - normalZ * 0.8,
+                -normalX * spread + (Math.random() - 0.5) * 3,
+                1.5 + Math.random() * 3,
+                -normalZ * spread + (Math.random() - 0.5) * 3,
+                {
+                    color: DEBRIS_COLOR,
+                    size: 0.14 + Math.random() * 0.22,
+                    sizeGrowth: 1.2,
+                    life: 0.4 + Math.random() * 0.5,
+                    gravity: 9,
+                    drag: 1.1,
+                    alpha: 0.55,
+                },
             );
         }
     }
 
-    public getPosition(): THREE.Vector3 {
-        return this.position.clone();
-    }
-
-    public getDirection(): THREE.Vector3 {
-        return this.direction.clone();
-    }
-
-    public getPositionRef(): Readonly<THREE.Vector3> {
-        return this.position;
-    }
-
-    public getDirectionRef(): Readonly<THREE.Vector3> {
-        return this.direction;
-    }
-
-    public getSpeed(): number {
-        return Math.abs(this.carPhysics.getVelocity());
+    public getPositionRef(): Readonly<THREE.Vector3> { return this.position; }
+    public getDirectionRef(): Readonly<THREE.Vector3> { return this.direction; }
+    public getSpeed(): number { return Math.abs(this.physics.getVelocity()); }
+    public getSpeedKph(): number { return Math.abs(this.physics.getVelocity()) * 3.6; }
+    public getBoostCharge(): number { return this.physics.getBoostCharge(); }
+    public isBoosting(): boolean { return this.physics.isBoosting(); }
+    public isDrifting(): boolean { return this.physics.isDrifting(); }
+    public isAirborne(): boolean { return !this.grounded; }
+    public isOnTrack(): boolean { return this.onTrack; }
+    public getDriftIntensity(): number {
+        return THREE.MathUtils.clamp(Math.abs(this.physics.getLateralVelocity()) / 6, 0, 1);
     }
 
     public dispose(): void {
-        this.trailSystem.dispose();
-        this.carModel.dispose();
-        this.contactShadow.parent?.remove(this.contactShadow);
-        this.contactShadow.geometry.dispose();
-        this.contactShadowTexture.dispose();
-        this.contactShadowMaterial.dispose();
-        this.carGroup.parent?.remove(this.carGroup);
-        this.collisionObjects.length = 0;
+        this.trails.dispose();
+        this.model.dispose();
+        this.root.parent?.remove(this.root);
     }
 }
