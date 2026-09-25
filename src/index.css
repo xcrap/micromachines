@@ -1,1 +1,162 @@
 @import "tailwindcss";
+
+@theme {
+    --color-ink: #1a1c2c;
+    --color-ink-soft: #2b2e44;
+    --color-paper: #fff5dc;
+    --color-paper-dim: #efe0bc;
+    --color-toy-red: #e5322d;
+    --color-toy-red-deep: #a8201c;
+    --color-toy-yellow: #ffcb2e;
+    --color-toy-blue: #2e6be6;
+    --color-toy-green: #2fb45a;
+
+    --font-display: "Bungee", "Impact", system-ui, sans-serif;
+    --font-body: "Rubik", "Trebuchet MS", system-ui, sans-serif;
+
+    --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+html,
+body,
+#root {
+    height: 100%;
+    margin: 0;
+    background: var(--color-ink);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+}
+
+/* Components sit below Tailwind utilities, so a `bg-*` class can recolour a sticker. */
+@layer components {
+    /* A vinyl sticker slapped onto the screen: thick ink outline and a hard, unblurred shadow. */
+    .sticker {
+        background: var(--color-paper);
+        color: var(--color-ink);
+        border: 3px solid var(--color-ink);
+        border-radius: 12px;
+        box-shadow: 4px 4px 0 var(--color-ink);
+    }
+
+    .sticker-sm {
+        border-width: 2px;
+        border-radius: 8px;
+        box-shadow: 3px 3px 0 var(--color-ink);
+    }
+
+    .keycap {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 1.6em;
+        padding: 0.1em 0.4em;
+        font-family: var(--font-display);
+        font-size: 0.72em;
+        line-height: 1.4;
+        color: var(--color-ink);
+        background: var(--color-paper);
+        border: 2px solid var(--color-ink);
+        border-radius: 6px;
+        box-shadow: 0 2px 0 var(--color-ink);
+    }
+
+    /* Toy-packaging logo: stacked hard offsets in red and ink behind yellow type. */
+    .logo-type {
+        font-family: var(--font-display);
+        color: var(--color-toy-yellow);
+        -webkit-text-stroke: 2px var(--color-ink);
+        text-shadow:
+            3px 3px 0 var(--color-toy-red),
+            6px 6px 0 var(--color-ink);
+        letter-spacing: 0.01em;
+        line-height: 0.92;
+    }
+
+    .outlined-type {
+        font-family: var(--font-display);
+        -webkit-text-stroke: 2px var(--color-ink);
+        text-shadow: 4px 4px 0 var(--color-ink);
+    }
+
+    .pattern-gingham {
+        background-color: #fdf1dc;
+        background-image:
+            linear-gradient(90deg, rgb(214 48 43 / 0.55) 50%, transparent 50%),
+            linear-gradient(rgb(214 48 43 / 0.55) 50%, transparent 50%);
+        background-size: 18px 18px;
+    }
+
+    .pattern-lawn {
+        background-color: #4c9a36;
+        background-image: repeating-linear-gradient(
+            90deg,
+            #5aae40 0 14px,
+            #438a30 14px 28px
+        );
+    }
+
+    .pattern-checker {
+        background-color: var(--color-paper);
+        background-image:
+            linear-gradient(45deg, var(--color-ink) 25%, transparent 25%, transparent 75%, var(--color-ink) 75%),
+            linear-gradient(45deg, var(--color-ink) 25%, transparent 25%, transparent 75%, var(--color-ink) 75%);
+        background-size: 12px 12px;
+        background-position: 0 0, 6px 6px;
+    }
+}
+
+@keyframes slap-in {
+    0% {
+        opacity: 0;
+        transform: scale(2.2) rotate(-8deg);
+    }
+    60% {
+        opacity: 1;
+    }
+    100% {
+        opacity: 1;
+        transform: scale(1) rotate(-3deg);
+    }
+}
+
+@keyframes rise-in {
+    from {
+        opacity: 0;
+        transform: translateY(14px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes ready-pulse {
+    0%,
+    100% {
+        transform: translateY(0) rotate(-4deg);
+    }
+    50% {
+        transform: translateY(-3px) rotate(-4deg);
+    }
+}
+
+.animate-slap {
+    animation: slap-in 420ms var(--ease-out-expo) both;
+}
+
+.animate-rise {
+    animation: rise-in 520ms var(--ease-out-quint) both;
+}
+
+.animate-ready {
+    animation: ready-pulse 700ms ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .animate-slap,
+    .animate-rise,
+    .animate-ready {
+        animation: none;
+    }
+}

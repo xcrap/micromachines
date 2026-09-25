@@ -1,6 +1,5 @@
 import * as THREE from "three";
-import { NOISE_GLSL } from "../core/Noise";
-import { SKY_HORIZON_COLOR, SKY_TOP_COLOR, SUN_DIRECTION } from "../core/Config";
+import { NOISE_GLSL } from "../../core/Noise";
 
 export interface SkyResult {
     mesh: THREE.Mesh;
@@ -12,7 +11,8 @@ const VERTEX_SHADER = /* glsl */ `
 varying vec3 vDirection;
 void main() {
     vDirection = position;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    // Pinned to the far plane so it is drawn last and only shades pixels nothing else covers.
+    gl_Position = (projectionMatrix * modelViewMatrix * vec4(position, 1.0)).xyww;
 }
 `;
 
@@ -65,27 +65,33 @@ void main() {
 }
 `;
 
-export function createSky(): SkyResult {
+export interface SkyOptions {
+    top: number;
+    horizon: number;
+    sunDirection: readonly [number, number, number];
+}
+
+export function createSky(options: SkyOptions): SkyResult {
     const geometry = new THREE.SphereGeometry(1, 32, 20);
 
     const material = new THREE.ShaderMaterial({
         uniforms: {
-            uTopColor: { value: new THREE.Color(SKY_TOP_COLOR) },
-            uHorizonColor: { value: new THREE.Color(SKY_HORIZON_COLOR) },
-            uSunDirection: { value: new THREE.Vector3(...SUN_DIRECTION).normalize() },
+            uTopColor: { value: new THREE.Color(options.top) },
+            uHorizonColor: { value: new THREE.Color(options.horizon) },
+            uSunDirection: { value: new THREE.Vector3(...options.sunDirection).normalize() },
             uTime: { value: 0 },
         },
         vertexShader: VERTEX_SHADER,
         fragmentShader: FRAGMENT_SHADER,
         side: THREE.BackSide,
         depthWrite: false,
-        depthTest: false,
+        depthTest: true,
         fog: false,
     });
 
     const mesh = new THREE.Mesh(geometry, material);
     mesh.scale.setScalar(600);
-    mesh.renderOrder = -1000;
+    mesh.renderOrder = 1000;
     mesh.frustumCulled = false;
     mesh.name = "sky";
     mesh.userData.nonCollidable = true;

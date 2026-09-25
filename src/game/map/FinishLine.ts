@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { TRACK_WIDTH } from "../core/Config";
 import type { TrackPath } from "./TrackPath";
-import type { Terrain } from "./Terrain";
+import type { HeightFunction } from "./Terrain";
 import type { Obstacle } from "./Scatter";
 
 export interface FinishLineResult {
@@ -25,11 +25,14 @@ const SOCKET_CENTER_Y_PX = 268;
 const SOCKET_RADIUS_PX = 34;
 const SOCKET_SPACING_PX = 132;
 
+const STRIP_DEPTH = 1.8;
+const STRIP_COLUMNS = 12;
+
 const RED_OFF = new THREE.Color(0x2e0c0c);
 const RED_ON = new THREE.Color(0xff2418);
 const GREEN_ON = new THREE.Color(0x2bff5a);
 
-export function createFinishLine(trackPath: TrackPath, terrain: Terrain): FinishLineResult {
+export function createFinishLine(trackPath: TrackPath, heightAt: HeightFunction): FinishLineResult {
     const root = new THREE.Group();
     root.name = "finish-line";
     root.userData.nonCollidable = true;
@@ -39,7 +42,10 @@ export function createFinishLine(trackPath: TrackPath, terrain: Terrain): Finish
 
     const start = trackPath.samples[0];
     const yaw = Math.atan2(start.tangentX, start.tangentZ);
-    const baseHeight = terrain.getHeightAt(start.x, start.z);
+    const baseHeight = Math.min(
+        heightAt(start.x - start.tangentZ * PILLAR_OFFSET, start.z + start.tangentX * PILLAR_OFFSET),
+        heightAt(start.x + start.tangentZ * PILLAR_OFFSET, start.z - start.tangentX * PILLAR_OFFSET),
+    );
 
     // The gantry is built facing +Z and then placed on the track; the painted line is world-space.
     const group = new THREE.Group();
@@ -47,8 +53,9 @@ export function createFinishLine(trackPath: TrackPath, terrain: Terrain): Finish
     group.rotation.y = yaw;
     root.add(group);
 
-    const steelMaterial = new THREE.MeshStandardMaterial({ color: 0xd8dde2, roughness: 0.35, metalness: 0.85 });
-    const accentMaterial = new THREE.MeshStandardMaterial({ color: 0xd8261f, roughness: 0.45, metalness: 0.25 });
+    // Glossy moulded plastic — this is a toy race set, not a real circuit.
+    const steelMaterial = new THREE.MeshStandardMaterial({ color: 0xf2c418, roughness: 0.28, metalness: 0 });
+    const accentMaterial = new THREE.MeshStandardMaterial({ color: 0xd8261f, roughness: 0.3, metalness: 0 });
     disposables.push(steelMaterial, accentMaterial);
 
     const pillarGeometry = new THREE.CylinderGeometry(0.28, 0.34, PILLAR_HEIGHT, 10);
@@ -91,12 +98,16 @@ export function createFinishLine(trackPath: TrackPath, terrain: Terrain): Finish
         map: bannerTexture,
         roughness: 0.72,
         metalness: 0.05,
-        side: THREE.DoubleSide,
     });
     const bannerGeometry = new THREE.PlaneGeometry(bannerWidth, BANNER_HEIGHT);
-    const banner = new THREE.Mesh(bannerGeometry, bannerMaterial);
-    banner.castShadow = true;
-    signGroup.add(banner);
+    // Back-to-back faces so the lettering reads correctly from both sides of the gantry.
+    for (const facing of [0, Math.PI]) {
+        const banner = new THREE.Mesh(bannerGeometry, bannerMaterial);
+        banner.rotation.y = facing;
+        banner.position.z = facing === 0 ? 0.01 : -0.01;
+        banner.castShadow = true;
+        signGroup.add(banner);
+    }
     disposables.push(bannerTexture, bannerMaterial, bannerGeometry);
 
     // Emissive lenses sit exactly on the sockets painted into the sign.
@@ -125,6 +136,10 @@ export function createFinishLine(trackPath: TrackPath, terrain: Terrain): Finish
         disposables.push(material);
     }
 
+    const strip = createStartStrip(trackPath, heightAt);
+    root.add(strip.mesh);
+    disposables.push(strip);
+
     return {
         group: root,
         obstacles,
@@ -145,6 +160,90 @@ export function createFinishLine(trackPath: TrackPath, terrain: Terrain): Finish
         },
         dispose() {
             disposables.forEach((item) => item.dispose());
+        },
+    };
+}
+
+/** Painted chequered line that hugs the ground across the full width of the road. */
+function createStartStrip(trackPath: TrackPath, heightAt: HeightFunction): { mesh: THREE.Mesh; dispose(): void } {
+    const start = trackPath.samples[0];
+    const normalX = -start.tangentZ;
+    const normalZ = start.tangentX;
+    const across = STRIP_COLUMNS * 2;
+    const along = 3;
+
+    const positions = new Float32Array((across + 1) * (along + 1) * 3);
+    const uvs = new Float32Array((across + 1) * (along + 1) * 2);
+    const indices: number[] = [];
+
+    for (let j = 0; j <= along; j++) {
+        const v = j / along;
+        const forward = (v - 0.5) * STRIP_DEPTH;
+        for (let i = 0; i <= across; i++) {
+            const u = i / across;
+            const lateral = (u - 0.5) * TRACK_WIDTH;
+            const x = start.x + normalX * lateral + start.tangentX * forward;
+            const z = start.z + normalZ * lateral + start.tangentZ * forward;
+            const index = j * (across + 1) + i;
+            positions[index * 3] = x;
+            positions[index * 3 + 1] = heightAt(x, z) + 0.035;
+            positions[index * 3 + 2] = z;
+            uvs[index * 2] = u;
+            uvs[index * 2 + 1] = v;
+        }
+    }
+
+    for (let j = 0; j < along; j++) {
+        for (let i = 0; i < across; i++) {
+            const a = j * (across + 1) + i;
+            const b = a + 1;
+            const c = a + across + 1;
+            const d = c + 1;
+            indices.push(a, c, b, b, c, d);
+        }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = STRIP_COLUMNS * 16;
+    canvas.height = 32;
+    const ctx = canvas.getContext("2d")!;
+    for (let x = 0; x < STRIP_COLUMNS; x++) {
+        for (let y = 0; y < 2; y++) {
+            ctx.fillStyle = (x + y) % 2 === 0 ? "#f4f2ea" : "#17181b";
+            ctx.fillRect(x * 16, y * 16, 16, 16);
+        }
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.magFilter = THREE.NearestFilter;
+    texture.anisotropy = 4;
+
+    const material = new THREE.MeshStandardMaterial({
+        map: texture,
+        roughness: 0.55,
+        metalness: 0,
+        polygonOffset: true,
+        polygonOffsetFactor: -4,
+        polygonOffsetUnits: -4,
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.receiveShadow = true;
+    mesh.renderOrder = 3;
+    mesh.name = "start-strip";
+
+    return {
+        mesh,
+        dispose() {
+            geometry.dispose();
+            material.dispose();
+            texture.dispose();
         },
     };
 }
@@ -179,7 +278,7 @@ function createBannerTexture(): THREE.Texture {
     ctx.fillRect(clearMargin, height - 14, width - clearMargin * 2, 14);
 
     ctx.fillStyle = "#ffd24a";
-    ctx.font = "bold 128px system-ui, -apple-system, sans-serif";
+    ctx.font = "128px Bungee, Impact, system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText("MICRO MACHINES", width / 2, 116);

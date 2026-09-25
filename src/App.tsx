@@ -1,330 +1,322 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { GameEngine, type HudState } from "./game/GameEngine";
-import { formatTime } from "./game/race/RaceManager";
-import { Car } from "./icons/Car";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { GameEngine, type HudState, type RacerStanding, type TrackOutline } from "./game/GameEngine";
+import { bestLapStorageKey, readStoredLap } from "./game/race/RaceManager";
+import { PLAYER_INDEX, ROSTER } from "./game/race/Roster";
+import { TRACK_ORDER, TRACKS, type TrackId } from "./game/tracks";
+import { Hud, type Announcement, type HudHandle } from "./ui/Hud";
+import { PauseMenu, type MenuOption } from "./ui/PauseMenu";
+import { Results } from "./ui/Results";
+import { TitleScreen, type TrackCard } from "./ui/TitleScreen";
+import { formatTime } from "./ui/format";
 
-const GAUGE_RADIUS = 54;
-const GAUGE_CIRCUMFERENCE = 2 * Math.PI * GAUGE_RADIUS;
-const GAUGE_ARC = GAUGE_CIRCUMFERENCE * 0.75;
-const MAX_DISPLAY_KPH = 160;
+type Screen = "menu" | "race" | "results";
 
-interface FinishSummary {
-    totalTime: number;
-    bestLap: number | null;
+const SELECTED_TRACK_KEY = "micro-machines-track";
+const ANNOUNCEMENT_MS = 1900;
+const RESULTS_DELAY_MS = 1700;
+const TRACK_SWITCH_DELAY_MS = 160;
+
+const RACER_DOTS = ROSTER.map((profile, index) => ({ color: profile.color, isPlayer: index === PLAYER_INDEX }));
+const RIVALS = ROSTER.filter((_, index) => index !== PLAYER_INDEX).map(({ name, color }) => ({ name, color }));
+
+function readSelectedTrack(): TrackId {
+    try {
+        const stored = window.localStorage.getItem(SELECTED_TRACK_KEY) as TrackId | null;
+        if (stored && stored in TRACKS) return stored;
+    } catch {
+        // Private browsing — fall through to the default.
+    }
+    return TRACK_ORDER[0];
+}
+
+function storeSelectedTrack(id: TrackId): void {
+    try {
+        window.localStorage.setItem(SELECTED_TRACK_KEY, id);
+    } catch {
+        // Not worth surfacing; the choice just will not persist.
+    }
+}
+
+/** Canvas textures in the world (banner, car numbers) are drawn with the display font, so wait for it briefly. */
+function waitForFonts(): Promise<unknown> {
+    const timeout = new Promise((resolve) => window.setTimeout(resolve, 2000));
+    if (!document.fonts) return Promise.resolve();
+    return Promise.race([
+        Promise.all([document.fonts.load("64px Bungee"), document.fonts.load("800 16px Rubik")]),
+        timeout,
+    ]);
 }
 
 function App() {
     const containerRef = useRef<HTMLDivElement>(null);
     const engineRef = useRef<GameEngine | null>(null);
+    const hudRef = useRef<HudHandle>(null);
 
-    const speedRef = useRef<HTMLSpanElement>(null);
-    const gaugeRef = useRef<SVGCircleElement>(null);
-    const boostRef = useRef<HTMLDivElement>(null);
-    const boostLabelRef = useRef<HTMLDivElement>(null);
-    const lapRef = useRef<HTMLSpanElement>(null);
-    const lapTimeRef = useRef<HTMLSpanElement>(null);
-    const lastLapRef = useRef<HTMLSpanElement>(null);
-    const bestLapRef = useRef<HTMLSpanElement>(null);
-    const fpsRef = useRef<HTMLSpanElement>(null);
-    const surfaceRef = useRef<HTMLSpanElement>(null);
-    const wrongWayRef = useRef<HTMLDivElement>(null);
-    const countdownRef = useRef<HTMLDivElement>(null);
+    const [ready, setReady] = useState(false);
+    const [screen, setScreen] = useState<Screen>("menu");
+    const [paused, setPaused] = useState(false);
+    const [pauseFocus, setPauseFocus] = useState(0);
+    const [selectedTrack, setSelectedTrack] = useState<TrackId>(readSelectedTrack);
+    const [standings, setStandings] = useState<RacerStanding[]>([]);
+    const [outline, setOutline] = useState<TrackOutline | null>(null);
+    const [announcement, setAnnouncement] = useState<Announcement | null>(null);
+    const [playerPosition, setPlayerPosition] = useState(ROSTER.length);
+    const [newRecord, setNewRecord] = useState(false);
+    const [recordsVersion, setRecordsVersion] = useState(0);
 
-    const previous = useRef({ speed: "", lap: "", lapTime: "", lastLap: "", bestLap: "", fps: "", countdown: "", surface: "" });
-    const latestBestLap = useRef<number | null>(null);
+    const screenRef = useRef<Screen>("menu");
+    const standingsVersion = useRef(-1);
+    const lastLapTime = useRef(0);
+    const announcementId = useRef(0);
+    const timers = useRef<number[]>([]);
+    const loadedTrack = useRef<TrackId | null>(null);
 
-    const [finish, setFinish] = useState<FinishSummary | null>(null);
-    const [toast, setToast] = useState<string | null>(null);
-    const toastTimer = useRef<number | null>(null);
+    screenRef.current = screen;
 
-    const showToast = useCallback((message: string) => {
-        setToast(message);
-        if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
-        toastTimer.current = window.setTimeout(() => setToast(null), 2200);
+    const schedule = useCallback((callback: () => void, delay: number) => {
+        const id = window.setTimeout(() => {
+            timers.current = timers.current.filter((timer) => timer !== id);
+            callback();
+        }, delay);
+        timers.current.push(id);
     }, []);
 
-    const applyHud = useCallback((state: HudState) => {
-        const cache = previous.current;
+    const clearTimers = useCallback(() => {
+        timers.current.forEach((id) => window.clearTimeout(id));
+        timers.current = [];
+    }, []);
 
-        const speed = Math.round(state.speedKph).toString();
-        if (speed !== cache.speed) {
-            cache.speed = speed;
-            if (speedRef.current) speedRef.current.textContent = speed;
-        }
+    const announce = useCallback((text: string, tone: Announcement["tone"], detail?: string) => {
+        const id = ++announcementId.current;
+        setAnnouncement({ id, text, tone, detail });
+        schedule(() => setAnnouncement((current) => (current?.id === id ? null : current)), ANNOUNCEMENT_MS);
+    }, [schedule]);
 
-        if (gaugeRef.current) {
-            const fraction = Math.min(1, state.speedKph / MAX_DISPLAY_KPH);
-            gaugeRef.current.style.strokeDashoffset = `${GAUGE_ARC * (1 - fraction)}`;
-            gaugeRef.current.style.stroke = state.airborne
-                ? "#a78bfa"
-                : state.onTrack
-                    ? "#facc15"
-                    : "#fb923c";
-        }
+    const handleHud = useCallback((state: HudState) => {
+        if (state.mode === "race") hudRef.current?.update(state);
 
-        if (boostRef.current) {
-            boostRef.current.style.width = `${Math.round(state.boost * 100)}%`;
-        }
-        if (boostLabelRef.current) {
-            const ready = state.boost >= 0.18;
-            boostLabelRef.current.style.color = ready ? "#22d3ee" : "rgba(255,255,255,0.4)";
-            boostLabelRef.current.style.textShadow = ready ? "0 0 10px rgba(34,211,238,0.75)" : "none";
-        }
-
-        const lap = `${Math.min(state.lap, state.totalLaps)}/${state.totalLaps}`;
-        if (lap !== cache.lap) {
-            cache.lap = lap;
-            if (lapRef.current) lapRef.current.textContent = lap;
-        }
-
-        const lapTime = formatTime(state.lapTime);
-        if (lapTime !== cache.lapTime) {
-            cache.lapTime = lapTime;
-            if (lapTimeRef.current) lapTimeRef.current.textContent = lapTime;
-        }
-
-        const lastLap = formatTime(state.lastLap);
-        if (lastLap !== cache.lastLap) {
-            cache.lastLap = lastLap;
-            if (lastLapRef.current) lastLapRef.current.textContent = lastLap;
-        }
-
-        latestBestLap.current = state.bestLap;
-        const bestLap = formatTime(state.bestLap);
-        if (bestLap !== cache.bestLap) {
-            cache.bestLap = bestLap;
-            if (bestLapRef.current) bestLapRef.current.textContent = bestLap;
-        }
-
-        const fps = `${Math.round(state.fps)} fps`;
-        if (fps !== cache.fps) {
-            cache.fps = fps;
-            if (fpsRef.current) fpsRef.current.textContent = fps;
-        }
-
-        const surface = state.airborne ? "AIR" : state.onTrack ? "TRACK" : "OFF-ROAD";
-        if (surface !== cache.surface) {
-            cache.surface = surface;
-            if (surfaceRef.current) {
-                surfaceRef.current.textContent = surface;
-                surfaceRef.current.style.color = state.airborne
-                    ? "#c4b5fd"
-                    : state.onTrack
-                        ? "rgba(255,255,255,0.45)"
-                        : "#fb923c";
-            }
-        }
-
-        if (wrongWayRef.current) {
-            wrongWayRef.current.style.opacity = state.wrongWay ? "1" : "0";
-        }
-
-        const countdown = state.raceState === "countdown"
-            ? (state.countdown > 0 ? Math.ceil(state.countdown).toString() : "GO!")
-            : "";
-        if (countdown !== cache.countdown) {
-            cache.countdown = countdown;
-            if (countdownRef.current) {
-                countdownRef.current.textContent = countdown;
-                countdownRef.current.style.opacity = countdown ? "1" : "0";
-                countdownRef.current.style.transform = `scale(${countdown === "GO!" ? 1.25 : 1})`;
-                countdownRef.current.style.color = countdown === "GO!" ? "#4ade80" : "#ffffff";
-            }
+        if (state.standingsVersion !== standingsVersion.current) {
+            standingsVersion.current = state.standingsVersion;
+            const engine = engineRef.current;
+            if (engine) setStandings(engine.getStandings());
         }
     }, []);
 
     useEffect(() => {
-        if (!containerRef.current) return;
+        let cancelled = false;
+        let engine: GameEngine | null = null;
 
-        const engine = new GameEngine(containerRef.current);
-        engineRef.current = engine;
+        waitForFonts().then(() => {
+            if (cancelled || !containerRef.current) return;
 
-        engine.setHudListener(applyHud);
-        engine.setHudEvents({
-            onLapCompleted(lap, lapTime, isBest) {
-                showToast(isBest ? `NEW BEST LAP  ${formatTime(lapTime)}` : `LAP ${lap - 1}  ${formatTime(lapTime)}`);
-            },
-            onRaceFinished(totalTime) {
-                setFinish({ totalTime, bestLap: latestBestLap.current });
-            },
+            engine = new GameEngine(containerRef.current);
+            engineRef.current = engine;
+            engine.setHudListener(handleHud);
+            engine.setHudEvents({
+                onLapCompleted(lap, lapTime, isBest) {
+                    lastLapTime.current = lapTime;
+                    if (isBest) setNewRecord(true);
+                    announce(isBest ? "LAP RECORD!" : `LAP ${lap}`, isBest ? "blue" : "yellow", formatTime(lapTime));
+                },
+                onFinalLap() {
+                    announce("FINAL LAP!", "red", formatTime(lastLapTime.current));
+                },
+                onRaceFinished(position) {
+                    setPlayerPosition(position);
+                    announce(position === 1 ? "WINNER!" : "FINISH!", position === 1 ? "yellow" : "green");
+                    schedule(() => {
+                        if (screenRef.current === "race") setScreen("results");
+                    }, RESULTS_DELAY_MS);
+                },
+                onPlayerFell() {
+                    announce("OOPS!", "red", "Back on the track");
+                },
+            });
+
+            const track = readSelectedTrack();
+            engine.loadTrack(track);
+            loadedTrack.current = track;
+            setOutline(engine.getTrackOutline());
+            setStandings(engine.getStandings());
+            engine.start();
+            setReady(true);
         });
 
-        engine.start();
-
         return () => {
-            if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
-            engine.dispose();
+            cancelled = true;
+            clearTimers();
+            engine?.dispose();
             engineRef.current = null;
         };
-    }, [applyHud, showToast]);
+    }, [announce, clearTimers, handleHud, schedule]);
 
-    const restart = useCallback(() => {
-        setFinish(null);
-        setToast(null);
-        engineRef.current?.restart();
+    // Rebuilding a world takes a moment, so let rapid menu scrolling settle before loading.
+    useEffect(() => {
+        if (!ready || loadedTrack.current === selectedTrack) return;
+        const id = window.setTimeout(() => {
+            const engine = engineRef.current;
+            // Starting a race loads the selection itself; never swap worlds under a race.
+            if (!engine || screenRef.current !== "menu" || loadedTrack.current === selectedTrack) return;
+            engine.loadTrack(selectedTrack);
+            loadedTrack.current = selectedTrack;
+            setOutline(engine.getTrackOutline());
+            setStandings(engine.getStandings());
+        }, TRACK_SWITCH_DELAY_MS);
+        return () => window.clearTimeout(id);
+    }, [ready, selectedTrack]);
+
+    const selectTrack = useCallback((id: TrackId) => {
+        setSelectedTrack(id);
+        storeSelectedTrack(id);
     }, []);
 
-    useEffect(() => {
-        if (!finish) return;
+    const startRace = useCallback(() => {
+        const engine = engineRef.current;
+        if (!engine) return;
+        if (loadedTrack.current !== selectedTrack) {
+            engine.loadTrack(selectedTrack);
+            loadedTrack.current = selectedTrack;
+            setOutline(engine.getTrackOutline());
+        }
+        clearTimers();
+        engine.startRace();
+        setAnnouncement(null);
+        setNewRecord(false);
+        setPaused(false);
+        setStandings(engine.getStandings());
+        setScreen("race");
+    }, [clearTimers, selectedTrack]);
 
+    const backToMenu = useCallback(() => {
+        clearTimers();
+        engineRef.current?.exitToMenu();
+        setAnnouncement(null);
+        setPaused(false);
+        setScreen("menu");
+        setRecordsVersion((version) => version + 1);
+    }, [clearTimers]);
+
+    const setEnginePaused = useCallback((value: boolean) => {
+        engineRef.current?.setPaused(value);
+        setPaused(value);
+        setPauseFocus(0);
+    }, []);
+
+    const pauseOptions = useMemo<MenuOption[]>(() => [
+        { label: "RESUME", onSelect: () => setEnginePaused(false) },
+        { label: "RESTART", onSelect: startRace },
+        { label: "PICK TRACK", onSelect: backToMenu },
+    ], [backToMenu, setEnginePaused, startRace]);
+
+    // Coming back to a hidden tab mid-race should not throw the player straight back into traffic.
+    useEffect(() => {
+        const onVisibility = () => {
+            if (document.hidden && screenRef.current === "race" && !paused) setEnginePaused(true);
+        };
+        document.addEventListener("visibilitychange", onVisibility);
+        return () => document.removeEventListener("visibilitychange", onVisibility);
+    }, [paused, setEnginePaused]);
+
+    useEffect(() => {
         const onKey = (event: KeyboardEvent) => {
-            if (event.key === "Enter") restart();
+            if (event.repeat) return;
+            const key = event.key;
+
+            if (screen === "menu") {
+                const index = TRACK_ORDER.indexOf(selectedTrack);
+                if (key === "ArrowUp" || key === "ArrowLeft" || key === "w") {
+                    selectTrack(TRACK_ORDER[(index - 1 + TRACK_ORDER.length) % TRACK_ORDER.length]);
+                } else if (key === "ArrowDown" || key === "ArrowRight" || key === "s") {
+                    selectTrack(TRACK_ORDER[(index + 1) % TRACK_ORDER.length]);
+                } else if (key === "Enter") {
+                    startRace();
+                }
+                return;
+            }
+
+            if (screen === "results") {
+                if (key === "Enter") startRace();
+                else if (key === "Escape") backToMenu();
+                return;
+            }
+
+            if (!paused) {
+                if (key === "Escape") setEnginePaused(true);
+                return;
+            }
+
+            if (key === "Escape") {
+                setEnginePaused(false);
+            } else if (key === "ArrowUp") {
+                setPauseFocus((focus) => (focus - 1 + pauseOptions.length) % pauseOptions.length);
+            } else if (key === "ArrowDown") {
+                setPauseFocus((focus) => (focus + 1) % pauseOptions.length);
+            } else if (key === "Enter") {
+                pauseOptions[pauseFocus].onSelect();
+            }
         };
 
         window.addEventListener("keydown", onKey);
         return () => window.removeEventListener("keydown", onKey);
-    }, [finish, restart]);
+    }, [backToMenu, pauseFocus, pauseOptions, paused, screen, selectTrack, selectedTrack, setEnginePaused, startRace]);
+
+    // Recomputed whenever the menu comes back so freshly set lap records show up.
+    const trackCards = useMemo<TrackCard[]>(() => {
+        void recordsVersion;
+        return TRACK_ORDER.map((id) => ({
+            id,
+            name: TRACKS[id].name,
+            location: TRACKS[id].location,
+            description: TRACKS[id].description,
+            laps: TRACKS[id].laps,
+            bestLap: readStoredLap(bestLapStorageKey(id)),
+        }));
+    }, [recordsVersion]);
 
     return (
-        <div className="relative w-full h-screen overflow-hidden bg-[#0b1016]">
-            <div ref={containerRef} className="w-full h-full" />
+        <div className="relative h-dvh w-full overflow-hidden bg-ink">
+            <div ref={containerRef} className="h-full w-full" />
 
-            <div className="pointer-events-none absolute inset-0 select-none">
-                {/* Title + lap board */}
-                <div className="absolute top-4 left-4 flex flex-col gap-2">
-                    <div className="flex items-center gap-2.5 rounded-lg border border-white/10 bg-black/55 px-3 py-2 backdrop-blur-md">
-                        <Car className="h-5 w-5 text-amber-300" />
-                        <h1 className="text-sm font-semibold tracking-[0.18em] text-white/90">MICRO MACHINES</h1>
-                    </div>
-
-                    <div className="rounded-lg border border-white/10 bg-black/55 px-3 py-2.5 backdrop-blur-md">
-                        <div className="flex items-baseline gap-2">
-                            <span className="text-[10px] font-medium tracking-[0.2em] text-white/40">LAP</span>
-                            <span ref={lapRef} className="text-xl font-bold tabular-nums text-white">1/3</span>
-                        </div>
-                        <div className="mt-1.5 flex items-baseline gap-2">
-                            <span className="text-[10px] font-medium tracking-[0.2em] text-white/40">TIME</span>
-                            <span ref={lapTimeRef} className="text-lg font-semibold tabular-nums text-amber-300">0:00.000</span>
-                        </div>
-                        <div className="mt-1 flex flex-col gap-0.5 text-[11px] tabular-nums text-white/50">
-                            <div className="flex justify-between gap-4">
-                                <span>Last</span>
-                                <span ref={lastLapRef}>--:--.---</span>
-                            </div>
-                            <div className="flex justify-between gap-4">
-                                <span>Best</span>
-                                <span ref={bestLapRef} className="text-emerald-300/80">--:--.---</span>
-                            </div>
-                        </div>
-                    </div>
+            {!ready && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                    <span className="logo-type -rotate-3 text-[clamp(40px,6vw,72px)]">MICRO MACHINES</span>
                 </div>
+            )}
 
-                {/* Controls */}
-                <div className="absolute bottom-4 left-4 rounded-lg border border-white/10 bg-black/45 px-3 py-2.5 text-[11px] backdrop-blur-md">
-                    <div className="grid grid-cols-[auto_auto] gap-x-3 gap-y-1 text-white/70">
-                        <span className="text-white/40">Drive</span><span className="font-mono">↑ ↓ / Q A</span>
-                        <span className="text-white/40">Steer</span><span className="font-mono">← → / O P</span>
-                        <span className="text-white/40">Drift</span><span className="font-mono">Space</span>
-                        <span className="text-white/40">Boost</span><span className="font-mono text-cyan-300/80">Shift</span>
-                        <span className="text-white/40">Respawn</span><span className="font-mono">R</span>
-                        <span className="text-white/40">Camera</span><span className="font-mono">C</span>
-                    </div>
-                    <div className="mt-2 flex items-center justify-between gap-4 border-t border-white/10 pt-1.5 text-[10px] text-white/35">
-                        <span ref={surfaceRef}>TRACK</span>
-                        <span ref={fpsRef}>60 fps</span>
-                    </div>
-                </div>
-
-                {/* Speed + boost */}
-                <div className="absolute right-4 bottom-4 flex flex-col items-end gap-2">
-                    <div className="relative h-32 w-32">
-                        <svg viewBox="0 0 128 128" className="h-full w-full -rotate-[0deg]">
-                            <circle
-                                cx="64"
-                                cy="64"
-                                r={GAUGE_RADIUS}
-                                fill="rgba(0,0,0,0.5)"
-                                stroke="rgba(255,255,255,0.12)"
-                                strokeWidth="7"
-                                strokeLinecap="round"
-                                strokeDasharray={`${GAUGE_ARC} ${GAUGE_CIRCUMFERENCE}`}
-                                transform="rotate(135 64 64)"
-                            />
-                            <circle
-                                ref={gaugeRef}
-                                cx="64"
-                                cy="64"
-                                r={GAUGE_RADIUS}
-                                fill="none"
-                                stroke="#facc15"
-                                strokeWidth="7"
-                                strokeLinecap="round"
-                                strokeDasharray={`${GAUGE_ARC} ${GAUGE_CIRCUMFERENCE}`}
-                                strokeDashoffset={GAUGE_ARC}
-                                transform="rotate(135 64 64)"
-                                style={{ transition: "stroke 200ms linear" }}
-                            />
-                        </svg>
-                        <div className="absolute inset-0 flex flex-col items-center justify-center">
-                            <span ref={speedRef} className="text-3xl font-bold leading-none tabular-nums text-white">0</span>
-                            <span className="mt-0.5 text-[9px] font-medium tracking-[0.22em] text-white/40">KM/H</span>
-                        </div>
-                    </div>
-
-                    <div className="w-32 rounded-md border border-white/10 bg-black/55 px-2 py-1.5 backdrop-blur-md">
-                        <div ref={boostLabelRef} className="mb-1 text-[9px] font-semibold tracking-[0.22em] text-white/40">
-                            BOOST
-                        </div>
-                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
-                            <div
-                                ref={boostRef}
-                                className="h-full w-0 rounded-full bg-gradient-to-r from-cyan-400 to-sky-300"
-                                style={{ transition: "width 90ms linear" }}
-                            />
-                        </div>
-                    </div>
-                </div>
-
-                {/* Countdown */}
-                <div
-                    ref={countdownRef}
-                    className="absolute inset-x-0 top-[44%] text-center text-7xl font-black tracking-tight text-white opacity-0 drop-shadow-[0_4px_24px_rgba(0,0,0,0.75)]"
-                    style={{ transition: "opacity 160ms ease-out, transform 160ms ease-out" }}
+            {ready && screen === "menu" && (
+                <TitleScreen
+                    tracks={trackCards}
+                    selected={selectedTrack}
+                    rivals={RIVALS}
+                    onSelect={selectTrack}
+                    onStart={startRace}
                 />
+            )}
 
-                {/* Wrong way */}
-                <div
-                    ref={wrongWayRef}
-                    className="absolute inset-x-0 top-[16%] text-center text-2xl font-bold tracking-[0.2em] text-red-400 opacity-0 drop-shadow-[0_2px_12px_rgba(0,0,0,0.8)]"
-                    style={{ transition: "opacity 180ms ease-out" }}
-                >
-                    WRONG WAY
-                </div>
+            {ready && screen === "race" && (
+                <Hud
+                    ref={hudRef}
+                    standings={standings}
+                    racers={RACER_DOTS}
+                    outline={outline}
+                    announcement={announcement}
+                />
+            )}
 
-                {/* Lap toast */}
-                {toast && (
-                    <div className="absolute inset-x-0 top-[10%] flex justify-center">
-                        <div className="rounded-full border border-amber-300/30 bg-black/70 px-5 py-2 text-sm font-semibold tracking-[0.14em] text-amber-300 backdrop-blur-md">
-                            {toast}
-                        </div>
-                    </div>
-                )}
+            {screen === "race" && paused && (
+                <PauseMenu options={pauseOptions} focused={pauseFocus} onFocus={setPauseFocus} />
+            )}
 
-                {/* Race finished */}
-                {finish && (
-                    <div className="pointer-events-auto absolute inset-0 flex items-center justify-center bg-black/55 backdrop-blur-sm">
-                        <div className="w-72 rounded-xl border border-white/15 bg-[#10151c]/95 p-6 text-center shadow-2xl">
-                            <div className="text-[10px] font-semibold tracking-[0.28em] text-amber-300">RACE COMPLETE</div>
-                            <div className="mt-3 text-3xl font-bold tabular-nums text-white">
-                                {formatTime(finish.totalTime)}
-                            </div>
-                            <div className="mt-1 text-xs text-white/45">total time</div>
-                            <div className="mt-4 flex items-center justify-between rounded-lg bg-white/5 px-3 py-2 text-xs">
-                                <span className="text-white/45">Best lap</span>
-                                <span className="tabular-nums text-emerald-300">{formatTime(finish.bestLap)}</span>
-                            </div>
-                            <button
-                                type="button"
-                                onClick={restart}
-                                className="mt-5 w-full rounded-lg bg-amber-400 px-4 py-2.5 text-sm font-semibold text-black transition hover:bg-amber-300"
-                            >
-                                Race again
-                            </button>
-                            <div className="mt-2 text-[10px] text-white/30">or press Enter</div>
-                        </div>
-                    </div>
-                )}
-            </div>
+            {screen === "results" && (
+                <Results
+                    standings={standings}
+                    playerPosition={playerPosition}
+                    trackName={TRACKS[selectedTrack].name}
+                    newRecord={newRecord}
+                    onRaceAgain={startRace}
+                    onMenu={backToMenu}
+                />
+            )}
         </div>
     );
 }

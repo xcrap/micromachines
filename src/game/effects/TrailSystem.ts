@@ -2,13 +2,17 @@ import * as THREE from "three";
 
 const VERTEX_SHADER = /* glsl */ `
 attribute float aAlpha;
+attribute float aBirth;
 attribute vec3 aColor;
+
+uniform float uTime;
+uniform float uFadeRate;
 
 varying float vAlpha;
 varying vec3 vColor;
 
 void main() {
-    vAlpha = aAlpha;
+    vAlpha = aAlpha - (uTime - aBirth) * uFadeRate;
     vColor = aColor;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
@@ -35,12 +39,10 @@ const MIN_STEP = 0.06;
 const MIN_STEP_SQ = MIN_STEP * MIN_STEP;
 const FADE_RATE = 0.055;
 
-const TRACK_COLOR = new THREE.Color(0x2b1d0e);
-const GRASS_COLOR = new THREE.Color(0x3b3218);
-
 /**
- * One continuous ribbon per wheel, backed by a sliding buffer so the whole skid
- * history is a single draw call instead of a mesh per streak.
+ * One continuous ribbon per wheel, backed by a sliding buffer so the whole skid history is a
+ * single draw call. Fading happens on the GPU from each point's birth time, so a frame only
+ * uploads the points that were just laid.
  */
 class TrailRibbon {
     readonly mesh: THREE.Mesh;
@@ -48,13 +50,14 @@ class TrailRibbon {
     private readonly positions = new Float32Array(CAPACITY * 2 * 3);
     private readonly colors = new Float32Array(CAPACITY * 2 * 3);
     private readonly alphas = new Float32Array(CAPACITY * 2);
+    private readonly births = new Float32Array(CAPACITY * 2);
 
     private readonly geometry: THREE.BufferGeometry;
-    private readonly positionAttribute: THREE.BufferAttribute;
-    private readonly colorAttribute: THREE.BufferAttribute;
-    private readonly alphaAttribute: THREE.BufferAttribute;
+    private readonly attributes: THREE.BufferAttribute[];
 
     private count = 0;
+    private dirtyFrom = Infinity;
+    private fullUpload = false;
     private pendingBreak = true;
     private readonly lastPosition = new THREE.Vector3();
     private hasLast = false;
@@ -62,16 +65,17 @@ class TrailRibbon {
     constructor(material: THREE.ShaderMaterial) {
         this.geometry = new THREE.BufferGeometry();
 
-        this.positionAttribute = new THREE.BufferAttribute(this.positions, 3);
-        this.positionAttribute.setUsage(THREE.DynamicDrawUsage);
-        this.colorAttribute = new THREE.BufferAttribute(this.colors, 3);
-        this.colorAttribute.setUsage(THREE.DynamicDrawUsage);
-        this.alphaAttribute = new THREE.BufferAttribute(this.alphas, 1);
-        this.alphaAttribute.setUsage(THREE.DynamicDrawUsage);
+        const position = new THREE.BufferAttribute(this.positions, 3);
+        const color = new THREE.BufferAttribute(this.colors, 3);
+        const alpha = new THREE.BufferAttribute(this.alphas, 1);
+        const birth = new THREE.BufferAttribute(this.births, 1);
+        this.attributes = [position, color, alpha, birth];
+        for (const attribute of this.attributes) attribute.setUsage(THREE.DynamicDrawUsage);
 
-        this.geometry.setAttribute("position", this.positionAttribute);
-        this.geometry.setAttribute("aColor", this.colorAttribute);
-        this.geometry.setAttribute("aAlpha", this.alphaAttribute);
+        this.geometry.setAttribute("position", position);
+        this.geometry.setAttribute("aColor", color);
+        this.geometry.setAttribute("aAlpha", alpha);
+        this.geometry.setAttribute("aBirth", birth);
 
         const indices = new Uint16Array((CAPACITY - 1) * 6);
         for (let i = 0; i < CAPACITY - 1; i++) {
@@ -108,19 +112,26 @@ class TrailRibbon {
         halfWidth: number,
         color: THREE.Color,
         alpha: number,
+        time: number,
     ): void {
         if (this.hasLast && position.distanceToSquared(this.lastPosition) < MIN_STEP_SQ) return;
 
         if (this.count >= CAPACITY) this.recycle();
 
-        // A zero-alpha seam stops a resumed skid from being joined to the previous one.
+        // Zero-alpha seams on both sides of the gap stop a resumed skid from being joined to the previous one.
         if (this.pendingBreak) {
-            this.writePoint(position, rightX, rightZ, halfWidth, color, 0);
+            if (this.count > 0) {
+                const tail = (this.count - 1) * 2;
+                this.alphas[tail] = 0;
+                this.alphas[tail + 1] = 0;
+                this.dirtyFrom = Math.min(this.dirtyFrom, this.count - 1);
+            }
+            this.writePoint(position, rightX, rightZ, halfWidth, color, 0, time);
             this.pendingBreak = false;
             if (this.count >= CAPACITY) this.recycle();
         }
 
-        this.writePoint(position, rightX, rightZ, halfWidth, color, alpha);
+        this.writePoint(position, rightX, rightZ, halfWidth, color, alpha, time);
         this.lastPosition.copy(position);
         this.hasLast = true;
     }
@@ -132,6 +143,7 @@ class TrailRibbon {
         halfWidth: number,
         color: THREE.Color,
         alpha: number,
+        time: number,
     ): void {
         const index = this.count * 2;
         const left = index * 3;
@@ -154,7 +166,10 @@ class TrailRibbon {
 
         this.alphas[index] = alpha;
         this.alphas[index + 1] = alpha;
+        this.births[index] = time;
+        this.births[index + 1] = time;
 
+        if (this.count < this.dirtyFrom) this.dirtyFrom = this.count;
         this.count++;
     }
 
@@ -163,32 +178,38 @@ class TrailRibbon {
         this.positions.copyWithin(0, RECYCLE_BLOCK * 2 * 3, CAPACITY * 2 * 3);
         this.colors.copyWithin(0, RECYCLE_BLOCK * 2 * 3, CAPACITY * 2 * 3);
         this.alphas.copyWithin(0, RECYCLE_BLOCK * 2, CAPACITY * 2);
+        this.births.copyWithin(0, RECYCLE_BLOCK * 2, CAPACITY * 2);
         this.count = keep;
+        this.fullUpload = true;
     }
 
-    public update(deltaTime: number): void {
-        if (this.count === 0) return;
+    /** Pushes only the freshly written points to the GPU. */
+    public flush(): void {
+        if (!this.fullUpload && this.dirtyFrom === Infinity) return;
 
-        const fade = FADE_RATE * deltaTime;
-        const vertexCount = this.count * 2;
+        const from = this.fullUpload ? 0 : this.dirtyFrom;
+        const points = this.count - from;
+        const itemSizes = [3, 3, 1, 1];
 
-        for (let i = 0; i < vertexCount; i++) {
-            if (this.alphas[i] > 0) {
-                this.alphas[i] = Math.max(0, this.alphas[i] - fade);
-            }
+        for (let a = 0; a < this.attributes.length; a++) {
+            const attribute = this.attributes[a];
+            const size = itemSizes[a] * 2;
+            attribute.clearUpdateRanges();
+            if (!this.fullUpload) attribute.addUpdateRange(from * size, points * size);
+            attribute.needsUpdate = true;
         }
 
         this.geometry.setDrawRange(0, Math.max(0, (this.count - 1) * 6));
-        this.positionAttribute.needsUpdate = true;
-        this.colorAttribute.needsUpdate = true;
-        this.alphaAttribute.needsUpdate = true;
+        this.dirtyFrom = Infinity;
+        this.fullUpload = false;
     }
 
     public clear(): void {
         this.count = 0;
         this.pendingBreak = true;
         this.hasLast = false;
-        this.alphas.fill(0);
+        this.dirtyFrom = Infinity;
+        this.fullUpload = false;
         this.geometry.setDrawRange(0, 0);
     }
 
@@ -201,12 +222,15 @@ export class TrailSystem {
     private readonly material: THREE.ShaderMaterial;
     private readonly ribbons = new Map<string, TrailRibbon>();
     private readonly scene: THREE.Scene;
-    private readonly color = new THREE.Color();
+    private time = 0;
 
     constructor(scene: THREE.Scene) {
         this.scene = scene;
         this.material = new THREE.ShaderMaterial({
-            uniforms: {},
+            uniforms: {
+                uTime: { value: 0 },
+                uFadeRate: { value: FADE_RATE },
+            },
             vertexShader: VERTEX_SHADER,
             fragmentShader: FRAGMENT_SHADER,
             transparent: true,
@@ -219,42 +243,38 @@ export class TrailSystem {
         });
     }
 
-    private ribbon(wheelId: string): TrailRibbon {
-        let ribbon = this.ribbons.get(wheelId);
+    private ribbon(id: string): TrailRibbon {
+        let ribbon = this.ribbons.get(id);
         if (!ribbon) {
             ribbon = new TrailRibbon(this.material);
             this.scene.add(ribbon.mesh);
-            this.ribbons.set(wheelId, ribbon);
+            this.ribbons.set(id, ribbon);
         }
         return ribbon;
     }
 
+    /** Lays a mark perpendicular to travel. `peakAlpha` is the opacity of a full-intensity skid on this surface. */
     public addMark(
-        wheelId: string,
+        id: string,
         position: THREE.Vector3,
         headingSin: number,
         headingCos: number,
-        onTrack: boolean,
+        color: THREE.Color,
+        peakAlpha: number,
         intensity: number,
     ): void {
-        // Ribbon runs perpendicular to travel.
         const rightX = -headingCos;
         const rightZ = headingSin;
 
         const clamped = THREE.MathUtils.clamp(intensity, 0, 1);
         const halfWidth = THREE.MathUtils.lerp(0.06, 0.13, clamped);
+        const alpha = peakAlpha * THREE.MathUtils.lerp(0.36, 1, clamped);
 
-        this.color.copy(onTrack ? TRACK_COLOR : GRASS_COLOR);
-        // Grass only gets flattened, so those marks stay far fainter than rubber on dirt.
-        const alpha = onTrack
-            ? THREE.MathUtils.lerp(0.22, 0.62, clamped)
-            : THREE.MathUtils.lerp(0.10, 0.28, clamped);
-
-        this.ribbon(wheelId).addPoint(position, rightX, rightZ, halfWidth, this.color, alpha);
+        this.ribbon(id).addPoint(position, rightX, rightZ, halfWidth, color, alpha, this.time);
     }
 
-    public breakAllTrails(): void {
-        for (const ribbon of this.ribbons.values()) ribbon.breakTrail();
+    public breakTrail(id: string): void {
+        this.ribbons.get(id)?.breakTrail();
     }
 
     public clear(): void {
@@ -262,7 +282,9 @@ export class TrailSystem {
     }
 
     public update(deltaTime: number): void {
-        for (const ribbon of this.ribbons.values()) ribbon.update(deltaTime);
+        this.time += deltaTime;
+        this.material.uniforms.uTime.value = this.time;
+        for (const ribbon of this.ribbons.values()) ribbon.flush();
     }
 
     public dispose(): void {

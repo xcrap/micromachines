@@ -1,7 +1,10 @@
 export interface Obstacle {
     x: number;
     z: number;
+    /** Collision radius for round obstacles; for boxes, only a bounding radius used for broad-phase lookups. */
     radius: number;
+    /** Present for rectangular obstacles: half extents along the box's own axes, rotated by `yaw` like any mesh. */
+    box?: { halfX: number; halfZ: number; yaw: number };
     /** Top of the obstacle relative to the ground — the car clears it when airborne above this. */
     height: number;
     /** 0 = brushed aside, 1 = immovable. Drives how hard the impact feels. */

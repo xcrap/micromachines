@@ -1,89 +1,79 @@
 import * as THREE from "three";
-import { TRACK_SURFACE_OFFSET, TRACK_WIDTH, type QualityTier } from "../core/Config";
+import { TRACK_WIDTH, type QualityTier } from "../core/Config";
 import { updateWind } from "../core/Wind";
+import { DebrisField } from "../effects/DebrisField";
+import type { SurfaceKind, SurfacePatch, ThemeContent, TrackTheme } from "../tracks/types";
 import { TrackPath, type TrackQuery } from "./TrackPath";
-import { Terrain, baseTerrainHeight } from "./Terrain";
-import { createGround } from "./Ground";
-import { createTrack } from "./Track";
-import { createTrees } from "./Trees";
-import { createRocks } from "./Rocks";
-import { createProps } from "./Props";
+import { Terrain } from "./Terrain";
 import { createFinishLine, type FinishLineResult } from "./FinishLine";
-import { createSky } from "./Sky";
 import type { Obstacle } from "./Scatter";
 
 const DRIVABLE_HALF_WIDTH = TRACK_WIDTH / 2 + 1.2;
 const OBSTACLE_CELL_SIZE = 8;
 
+export interface GridSlot {
+    x: number;
+    z: number;
+    heading: number;
+}
+
+/** Everything the cars can touch: the theme's world plus the shared race furniture. */
 export class MapBuilder {
     private readonly scene: THREE.Scene;
     private readonly quality: QualityTier;
+    private readonly theme: TrackTheme;
 
     private readonly trackPath: TrackPath;
     private readonly terrain: Terrain;
 
-    private readonly disposables: { dispose(): void }[] = [];
     private readonly roots: THREE.Object3D[] = [];
-    private readonly obstacles: Obstacle[] = [];
     private readonly obstacleCells = new Map<number, Obstacle[]>();
+    private readonly patches: SurfacePatch[] = [];
+    private readonly debris: DebrisField[] = [];
 
-    private sky: ReturnType<typeof createSky> | null = null;
+    private content: ThemeContent | null = null;
     private finishLine: FinishLineResult | null = null;
 
     private readonly _surfaceSample = { height: 0, trackDistance: 0 };
+    private readonly heightAt = (x: number, z: number) => this.getSurfaceHeightAt(x, z);
 
-    constructor(scene: THREE.Scene, quality: QualityTier) {
+    constructor(scene: THREE.Scene, quality: QualityTier, theme: TrackTheme) {
         this.scene = scene;
         this.quality = quality;
-        this.trackPath = new TrackPath(baseTerrainHeight);
-        this.terrain = new Terrain(this.trackPath);
+        this.theme = theme;
+        this.trackPath = new TrackPath(theme.layout, (x, z) => theme.baseHeight(x, z));
+        this.terrain = new Terrain(this.trackPath, (x, z) => theme.baseHeight(x, z), theme.gradeRoad);
     }
 
     public buildMap(): void {
-        this.sky = createSky();
-        this.add(this.sky.mesh, this.sky);
+        this.content = this.theme.build({
+            trackPath: this.trackPath,
+            terrain: this.terrain,
+            quality: this.quality,
+        });
 
-        const ground = createGround(this.terrain, this.quality.groundSegments);
-        this.add(ground.mesh, ground);
+        for (const object of this.content.objects) this.attach(object);
+        this.registerObstacles(this.content.obstacles);
+        this.patches.push(...this.content.patches);
 
-        const track = createTrack(this.trackPath, this.terrain);
-        this.add(track.roadMesh, track);
-        if (track.kerbMesh) this.roots.push(this.attach(track.kerbMesh));
+        for (const spec of this.content.debris) {
+            const field = new DebrisField(spec, this.heightAt);
+            this.debris.push(field);
+            this.attach(field.mesh);
+        }
 
-        this.finishLine = createFinishLine(this.trackPath, this.terrain);
-        this.add(this.finishLine.group, this.finishLine);
+        this.finishLine = createFinishLine(this.trackPath, this.heightAt);
+        this.attach(this.finishLine.group);
         this.registerObstacles(this.finishLine.obstacles);
-
-        const trees = createTrees(this.terrain, this.quality.treeCount);
-        trees.meshes.forEach((mesh) => this.roots.push(this.attach(mesh)));
-        this.disposables.push(trees);
-        this.registerObstacles(trees.obstacles);
-
-        const rocks = createRocks(this.terrain, this.quality.rockCount);
-        rocks.meshes.forEach((mesh) => this.roots.push(this.attach(mesh)));
-        this.disposables.push(rocks);
-        this.registerObstacles(rocks.obstacles);
-
-        const props = createProps(this.trackPath, this.terrain);
-        props.meshes.forEach((mesh) => this.roots.push(this.attach(mesh)));
-        this.disposables.push(props);
-        this.registerObstacles(props.obstacles);
     }
 
-    private add(object: THREE.Object3D, disposable: { dispose(): void }): void {
-        this.roots.push(this.attach(object));
-        this.disposables.push(disposable);
-    }
-
-    private attach(object: THREE.Object3D): THREE.Object3D {
+    private attach(object: THREE.Object3D): void {
         this.scene.add(object);
-        return object;
+        this.roots.push(object);
     }
 
     private registerObstacles(obstacles: readonly Obstacle[]): void {
         for (const obstacle of obstacles) {
-            this.obstacles.push(obstacle);
-
             const cx = Math.floor(obstacle.x / OBSTACLE_CELL_SIZE);
             const cz = Math.floor(obstacle.z / OBSTACLE_CELL_SIZE);
             const key = (cx + 2048) * 4096 + (cz + 2048);
@@ -113,14 +103,50 @@ export class MapBuilder {
         }
     }
 
+    /** Pushes loose debris out of a car's way and returns the fraction of speed the car loses. */
+    public collideDebris(
+        x: number,
+        z: number,
+        y: number,
+        headingSin: number,
+        headingCos: number,
+        vx: number,
+        vz: number,
+    ): number {
+        let drag = 0;
+        for (const field of this.debris) {
+            drag += field.collideCar(x, z, y, headingSin, headingCos, vx, vz);
+        }
+        return drag;
+    }
+
     public getSurfaceHeightAt(x: number, z: number): number {
+        // Ungraded worlds have no road to blend in, so skip the centreline lookup on this hot path.
+        if (!this.theme.gradeRoad && this.theme.roadLift === 0) return this.theme.baseHeight(x, z);
+
         this.terrain.sampleSurface(x, z, this._surfaceSample);
+        if (this.theme.roadLift === 0) return this._surfaceSample.height;
+
         const fade = 1 - THREE.MathUtils.smoothstep(this._surfaceSample.trackDistance, DRIVABLE_HALF_WIDTH, DRIVABLE_HALF_WIDTH + 2);
-        return this._surfaceSample.height + TRACK_SURFACE_OFFSET * fade;
+        return this._surfaceSample.height + this.theme.roadLift * fade;
     }
 
     public isPointOnTrack(x: number, z: number): boolean {
         return this.trackPath.query(x, z).distance <= DRIVABLE_HALF_WIDTH;
+    }
+
+    /** Patches win over the track, which wins over the open ground. */
+    public getSurfaceAt(x: number, z: number, onTrack: boolean): SurfaceKind {
+        for (const patch of this.patches) {
+            const dx = x - patch.x;
+            const dz = z - patch.z;
+            const cos = Math.cos(patch.rotation);
+            const sin = Math.sin(patch.rotation);
+            const u = (dx * cos + dz * sin) / patch.radiusX;
+            const v = (-dx * sin + dz * cos) / patch.radiusZ;
+            if (u * u + v * v <= 1) return patch.surface;
+        }
+        return onTrack ? this.theme.surfaces.track : this.theme.surfaces.offTrack;
     }
 
     public queryTrack(x: number, z: number): Readonly<TrackQuery> {
@@ -135,43 +161,50 @@ export class MapBuilder {
         return this.terrain;
     }
 
-    public getStartPosition(): THREE.Vector3 {
-        const start = this.trackPath.samples[0];
-        // Line up a couple of car lengths behind the painted line.
-        const backOff = 6;
-        const x = start.x - start.tangentX * backOff;
-        const z = start.z - start.tangentZ * backOff;
-        return new THREE.Vector3(x, this.getSurfaceHeightAt(x, z), z);
+    public getTheme(): TrackTheme {
+        return this.theme;
     }
 
-    public getStartDirection(): THREE.Vector3 {
-        const start = this.trackPath.samples[0];
-        return new THREE.Vector3(start.tangentX, 0, start.tangentZ).normalize();
+    /** Staggered two-wide grid behind the line; slot 0 is pole position. */
+    public getGridSlot(slot: number, out: GridSlot): GridSlot {
+        const back = 6 + slot * 3.4;
+        const lateral = (slot % 2 === 0 ? -1 : 1) * 2.6;
+        const sample = this.trackPath.sampleAt(-back / this.trackPath.totalLength);
+
+        out.x = sample.x - sample.tangentZ * lateral;
+        out.z = sample.z + sample.tangentX * lateral;
+        out.heading = Math.atan2(sample.tangentX, sample.tangentZ);
+        return out;
     }
 
     public setStartLights(lit: number, go: boolean): void {
         this.finishLine?.setStartLights(lit, go);
     }
 
-    public update(elapsed: number): void {
+    public update(elapsed: number, deltaTime: number): void {
         updateWind(elapsed);
-        this.sky?.update(elapsed);
+        this.content?.update?.(elapsed);
+        for (const field of this.debris) field.update(deltaTime);
+    }
+
+    /** Puts knocked-about clutter back for a fresh race. */
+    public resetDynamic(): void {
+        for (const field of this.debris) field.reset();
     }
 
     public dispose(): void {
-        for (const root of this.roots) {
-            this.scene.remove(root);
-        }
+        for (const root of this.roots) this.scene.remove(root);
         this.roots.length = 0;
 
-        for (const disposable of this.disposables) {
-            disposable.dispose();
-        }
-        this.disposables.length = 0;
+        for (const field of this.debris) field.dispose();
+        this.debris.length = 0;
 
-        this.obstacles.length = 0;
-        this.obstacleCells.clear();
+        this.content?.dispose();
+        this.content = null;
+        this.finishLine?.dispose();
         this.finishLine = null;
-        this.sky = null;
+
+        this.obstacleCells.clear();
+        this.patches.length = 0;
     }
 }

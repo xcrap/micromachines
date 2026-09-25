@@ -194,6 +194,14 @@ export class ParticleSystem {
         (this.geometry.getAttribute("aAlpha") as THREE.BufferAttribute).needsUpdate = true;
     }
 
+    public clear(): void {
+        this.life.fill(0);
+        this.alphas.fill(0);
+        this.liveCount = 0;
+        this.cursor = 0;
+        this.geometry.setDrawRange(0, 0);
+    }
+
     public dispose(): void {
         this.geometry.dispose();
         this.material.dispose();

@@ -1,15 +1,27 @@
 import * as THREE from "three";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { AIDriver } from "./car/AIDriver";
 import { CarController } from "./car/CarController";
-import { MapBuilder } from "./map/MapBuilder";
-import { InputManager } from "./input/InputManager";
+import { resolveCarCollisions } from "./car/CarCollisions";
+import { CameraRig, type CameraMode } from "./camera/CameraRig";
+import { detectQualityTier, PHYSICS_STEP, type QualityTier } from "./core/Config";
 import { ParticleSystem } from "./effects/ParticleSystem";
-import { RaceManager, type RaceState } from "./race/RaceManager";
-import { detectQualityTier, FOG_COLOR, FOG_DENSITY, SUN_DIRECTION, type QualityTier } from "./core/Config";
+import { TrailSystem } from "./effects/TrailSystem";
+import { InputManager } from "./input/InputManager";
+import { MapBuilder } from "./map/MapBuilder";
+import { RaceManager, type RaceState, type RacerSample } from "./race/RaceManager";
+import { PLAYER_INDEX, ROSTER } from "./race/Roster";
+import { PostFX } from "./render/PostFX";
+import { SceneLighting } from "./render/SceneLighting";
+import { TRACKS, type TrackId } from "./tracks";
+
+export type GameMode = "attract" | "race";
 
 export interface HudState {
+    mode: GameMode;
+    paused: boolean;
     speedKph: number;
     boost: number;
+    boosting: boolean;
     drifting: boolean;
     airborne: boolean;
     onTrack: boolean;
@@ -18,49 +30,73 @@ export interface HudState {
     lapTime: number;
     lastLap: number | null;
     bestLap: number | null;
+    recordLap: number | null;
     totalTime: number;
     raceState: RaceState;
     countdown: number;
     wrongWay: boolean;
+    position: number;
+    racerCount: number;
     fps: number;
     quality: QualityTier["name"];
+    cameraMode: CameraMode;
+    /** x, z per racer in roster order — read by the minimap every frame. */
+    carPositions: Float32Array;
+    /** Bumps whenever the running order or a finish changes, so the UI knows to re-read standings. */
+    standingsVersion: number;
+}
+
+export interface RacerStanding {
+    index: number;
+    name: string;
+    color: string;
+    isPlayer: boolean;
+    position: number;
+    finished: boolean;
+    finishTime: number | null;
+    bestLap: number | null;
+    lapsCompleted: number;
+}
+
+export interface TrackOutline {
+    points: Float32Array;
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
 }
 
 export interface HudEvents {
     onLapCompleted(lap: number, lapTime: number, isBest: boolean): void;
-    onRaceFinished(totalTime: number): void;
+    onFinalLap(): void;
+    onRaceFinished(position: number): void;
+    onPlayerFell(): void;
 }
 
-const PHYSICS_STEP = 1 / 120;
 const MAX_SUBSTEPS = 8;
-const SUN_DISTANCE = 90;
-
-/**
- * High and far back on purpose. The whole appeal of Micro Machines is that the cars are
- * tiny specks on a big track, so the camera sits well above and the field of view stays put.
- */
-const CAMERA_DISTANCE = 26;
-const CAMERA_HEIGHT = 20;
-const CAMERA_LOOK_AHEAD = 9;
-const CAMERA_FOV = 44;
+const OUTLINE_STRIDE = 6;
 
 export class GameEngine {
     private readonly scene = new THREE.Scene();
-    private readonly camera: THREE.PerspectiveCamera;
     private readonly renderer: THREE.WebGLRenderer;
-    private readonly controls: OrbitControls;
     private readonly quality: QualityTier;
+    private readonly lighting: SceneLighting;
+    private readonly cameraRig: CameraRig;
+    private readonly postFX: PostFX | null;
 
-    private readonly inputManager: InputManager;
-    private readonly mapBuilder: MapBuilder;
+    private readonly inputManager = new InputManager();
     private readonly particles: ParticleSystem;
-    private readonly carController: CarController;
-    private readonly raceManager = new RaceManager();
+    private readonly trails: TrailSystem;
 
-    private readonly sunLight: THREE.DirectionalLight;
-    private readonly lights: THREE.Object3D[] = [];
+    private trackId: TrackId | null = null;
+    private mapBuilder: MapBuilder | null = null;
+    private raceManager: RaceManager | null = null;
+    private readonly cars: CarController[] = [];
+    private readonly drivers: AIDriver[] = [];
+    private autopilot: AIDriver | null = null;
 
-    private cameraMode: "follow" | "free" = "follow";
+    private mode: GameMode = "attract";
+    private paused = false;
     private isRunning = false;
     private rafId: number | null = null;
     private lastTimestamp = 0;
@@ -70,16 +106,22 @@ export class GameEngine {
     private renderScale = 1;
     private frameTimeAverage = 16.7;
     private qualitySamples = 0;
+    private failedScale = Infinity;
+    private failedScaleAge = 0;
     private fpsAverage = 60;
 
     private hudListener: ((state: HudState) => void) | null = null;
     private hudEvents: HudEvents | null = null;
-
-    private hasCameraState = false;
+    private readonly racerSamples: RacerSample[] = ROSTER.map(() => ({
+        t: 0, tangentX: 0, tangentZ: 1, directionX: 0, directionZ: 1, speed: 0, onTrack: true,
+    }));
 
     private readonly hudState: HudState = {
+        mode: "attract",
+        paused: false,
         speedKph: 0,
         boost: 0,
+        boosting: false,
         drifting: false,
         airborne: false,
         onTrack: true,
@@ -88,18 +130,21 @@ export class GameEngine {
         lapTime: 0,
         lastLap: null,
         bestLap: null,
+        recordLap: null,
         totalTime: 0,
         raceState: "countdown",
         countdown: 0,
         wrongWay: false,
+        position: ROSTER.length,
+        racerCount: ROSTER.length,
         fps: 60,
         quality: "medium",
+        cameraMode: "chase",
+        carPositions: new Float32Array(ROSTER.length * 2),
+        standingsVersion: 0,
     };
 
-    private readonly _sunOffset = new THREE.Vector3(...SUN_DIRECTION).normalize().multiplyScalar(SUN_DISTANCE);
-    private readonly _cameraGoal = new THREE.Vector3();
-    private readonly _cameraLook = new THREE.Vector3();
-    private readonly _cameraLookCurrent = new THREE.Vector3();
+    private readonly groundAt = (x: number, z: number) => this.mapBuilder?.getSurfaceHeightAt(x, z) ?? 0;
 
     private handleResize = () => this.onResize();
     private handleVisibility = () => {
@@ -111,90 +156,40 @@ export class GameEngine {
         this.quality = detectQualityTier();
         this.hudState.quality = this.quality.name;
 
-        this.scene.background = new THREE.Color(FOG_COLOR);
-        this.scene.fog = new THREE.FogExp2(FOG_COLOR, FOG_DENSITY);
-
-        this.camera = new THREE.PerspectiveCamera(
-            CAMERA_FOV,
-            Math.max(1, container.clientWidth) / Math.max(1, container.clientHeight),
-            0.3,
-            1400,
-        );
+        const width = Math.max(1, container.clientWidth);
+        const height = Math.max(1, container.clientHeight);
 
         this.renderer = new THREE.WebGLRenderer({
-            antialias: this.quality.name !== "low",
+            antialias: false,
             alpha: false,
             stencil: false,
             powerPreference: "high-performance",
         });
         this.renderer.outputColorSpace = THREE.SRGBColorSpace;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 1.12;
         this.renderer.shadowMap.enabled = true;
-        // PCFSoftShadowMap is deprecated in current three and silently falls back to this anyway.
         this.renderer.shadowMap.type = THREE.PCFShadowMap;
-        this.renderer.setSize(Math.max(1, container.clientWidth), Math.max(1, container.clientHeight));
+        this.renderer.setSize(width, height);
         this.renderer.domElement.style.display = "block";
         container.appendChild(this.renderer.domElement);
 
-        this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-        this.controls.enableDamping = true;
-        this.controls.dampingFactor = 0.06;
-        this.controls.minDistance = 4;
-        this.controls.maxDistance = 140;
-        this.controls.maxPolarAngle = Math.PI / 2 - 0.05;
-        this.controls.enabled = false;
-
-        this.inputManager = new InputManager();
-
-        this.mapBuilder = new MapBuilder(this.scene, this.quality);
-        this.mapBuilder.buildMap();
+        this.cameraRig = new CameraRig(this.renderer.domElement, width / height);
+        this.lighting = new SceneLighting(this.scene, this.renderer, this.quality);
+        // Dense (retina) screens already sample finely enough; multisampling on top of that
+        // costs hundreds of megabytes of render target for no visible gain.
+        const densePixels = Math.min(window.devicePixelRatio || 1, this.quality.maxPixelRatio) >= 1.5;
+        this.postFX = this.quality.postProcessing
+            ? new PostFX(this.renderer, this.scene, this.cameraRig.camera, densePixels ? 0 : this.quality.msaaSamples)
+            : null;
 
         this.particles = new ParticleSystem(this.quality.particleCount);
         this.scene.add(this.particles.points);
-
-        this.carController = new CarController(this.scene, this.inputManager, this.mapBuilder, this.particles);
-
-        this.sunLight = this.setupLights();
+        this.trails = new TrailSystem(this.scene);
 
         this.applyPixelRatio();
-        this.particles.setViewport(this.renderer.domElement.height, THREE.MathUtils.degToRad(CAMERA_FOV));
-        this.updateCameraFollow(1 / 60, true);
-        this.updateSun();
-        this.renderer.render(this.scene, this.camera);
 
         window.addEventListener("resize", this.handleResize);
         document.addEventListener("visibilitychange", this.handleVisibility);
-    }
-
-    private setupLights(): THREE.DirectionalLight {
-        const hemisphere = new THREE.HemisphereLight(0xbcd9f2, 0x50543a, 1.05);
-        this.scene.add(hemisphere);
-        this.lights.push(hemisphere);
-
-        const ambient = new THREE.AmbientLight(0xffffff, 0.18);
-        this.scene.add(ambient);
-        this.lights.push(ambient);
-
-        const sun = new THREE.DirectionalLight(0xfff2d8, 2.6);
-        sun.castShadow = true;
-
-        const radius = this.quality.shadowRadius;
-        sun.shadow.mapSize.set(this.quality.shadowMapSize, this.quality.shadowMapSize);
-        sun.shadow.camera.left = -radius;
-        sun.shadow.camera.right = radius;
-        sun.shadow.camera.top = radius;
-        sun.shadow.camera.bottom = -radius;
-        sun.shadow.camera.near = 1;
-        sun.shadow.camera.far = SUN_DISTANCE * 2.4;
-        sun.shadow.bias = -0.0006;
-        sun.shadow.normalBias = 0.035;
-
-        this.scene.add(sun);
-        this.scene.add(sun.target);
-        this.lights.push(sun, sun.target);
-
-        return sun;
     }
 
     public setHudListener(listener: ((state: HudState) => void) | null): void {
@@ -203,6 +198,175 @@ export class GameEngine {
 
     public setHudEvents(events: HudEvents | null): void {
         this.hudEvents = events;
+    }
+
+    public getTrackId(): TrackId | null {
+        return this.trackId;
+    }
+
+    /** Builds a track and lets four AI cars race round it as a live menu backdrop. */
+    public loadTrack(id: TrackId): void {
+        this.unloadTrack();
+
+        const theme = TRACKS[id];
+        this.trackId = id;
+        this.lighting.apply(theme.environment, this.renderer);
+
+        this.mapBuilder = new MapBuilder(this.scene, this.quality, theme);
+        this.mapBuilder.buildMap();
+
+        const map = this.mapBuilder;
+        ROSTER.forEach((profile, index) => {
+            const driver = new AIDriver(map, profile.personality, () => this.cars);
+            const car = new CarController({
+                id: `car-${index}`,
+                scene: this.scene,
+                mapBuilder: map,
+                particles: this.particles,
+                trails: this.trails,
+                livery: profile.livery,
+                driver,
+            });
+            driver.attach(car);
+            this.cars.push(car);
+            this.drivers.push(driver);
+        });
+
+        this.hudState.totalLaps = theme.laps;
+        this.enterAttract();
+        this.renderer.compile(this.scene, this.cameraRig.camera);
+    }
+
+    private unloadTrack(): void {
+        for (const car of this.cars) car.dispose();
+        this.cars.length = 0;
+        this.drivers.length = 0;
+        this.autopilot = null;
+        this.raceManager = null;
+
+        this.mapBuilder?.dispose();
+        this.mapBuilder = null;
+        this.trails.clear();
+        this.particles.clear();
+    }
+
+    private enterAttract(): void {
+        this.mode = "attract";
+        this.paused = false;
+        this.raceManager = null;
+        this.resetField();
+
+        this.cars.forEach((car, index) => {
+            car.setDriver(this.drivers[index]);
+            this.drivers[index].setEnabled(true);
+            this.drivers[index].setPaceScale(1);
+        });
+
+        this.cameraRig.setAttract(true);
+        this.cameraRig.snap();
+    }
+
+    /** Lines the cars up on the grid with the player in control and starts the countdown. */
+    public startRace(): void {
+        if (!this.mapBuilder || !this.trackId) return;
+
+        const theme = TRACKS[this.trackId];
+        this.mode = "race";
+        this.paused = false;
+        this.raceManager = new RaceManager(this.trackId, theme.laps, this.cars.length, PLAYER_INDEX);
+        this.resetField();
+
+        this.cars.forEach((car, index) => {
+            this.drivers[index].setEnabled(false);
+            car.setDriver(index === PLAYER_INDEX ? this.inputManager : this.drivers[index]);
+        });
+
+        this.autopilot = null;
+        this.hudState.standingsVersion++;
+        this.cameraRig.setAttract(false);
+        this.cameraRig.snap();
+        this.inputManager.consumeAction("respawn");
+        this.inputManager.consumeAction("toggleCamera");
+    }
+
+    public restartRace(): void {
+        this.startRace();
+    }
+
+    public exitToMenu(): void {
+        if (!this.mapBuilder) return;
+        this.enterAttract();
+    }
+
+    private resetField(): void {
+        this.mapBuilder?.resetDynamic();
+        this.trails.clear();
+        this.particles.clear();
+        this.accumulator = 0;
+        this.cars.forEach((car, index) => car.placeOnGrid(ROSTER[index].gridSlot));
+    }
+
+    public setPaused(paused: boolean): void {
+        if (this.mode !== "race") return;
+        this.paused = paused;
+        this.lastTimestamp = 0;
+    }
+
+    public isPaused(): boolean {
+        return this.paused;
+    }
+
+    public getMode(): GameMode {
+        return this.mode;
+    }
+
+    public cycleCamera(): CameraMode {
+        const player = this.cars[PLAYER_INDEX];
+        if (!player) return this.cameraRig.getMode();
+        return this.cameraRig.cycleMode(player);
+    }
+
+    public getStandings(): RacerStanding[] {
+        const race = this.raceManager;
+        const order = race ? race.getStandings() : ROSTER.map((_, index) => index);
+
+        return order.map((index) => {
+            const status = race?.getRacer(index);
+            return {
+                index,
+                name: ROSTER[index].name,
+                color: ROSTER[index].color,
+                isPlayer: index === PLAYER_INDEX,
+                position: status?.position ?? index + 1,
+                finished: status?.finished ?? false,
+                finishTime: status?.finishTime ?? null,
+                bestLap: status?.bestLap ?? null,
+                lapsCompleted: status?.lapsCompleted ?? 0,
+            };
+        });
+    }
+
+    public getTrackOutline(): TrackOutline | null {
+        if (!this.mapBuilder) return null;
+        const samples = this.mapBuilder.getTrackPath().samples;
+        const count = Math.ceil(samples.length / OUTLINE_STRIDE);
+        const points = new Float32Array(count * 2);
+        let minX = Infinity;
+        let maxX = -Infinity;
+        let minZ = Infinity;
+        let maxZ = -Infinity;
+
+        for (let i = 0; i < count; i++) {
+            const sample = samples[i * OUTLINE_STRIDE];
+            points[i * 2] = sample.x;
+            points[i * 2 + 1] = sample.z;
+            minX = Math.min(minX, sample.x);
+            maxX = Math.max(maxX, sample.x);
+            minZ = Math.min(minZ, sample.z);
+            maxZ = Math.max(maxZ, sample.z);
+        }
+
+        return { points, minX, maxX, minZ, maxZ };
     }
 
     public start(): void {
@@ -223,219 +387,253 @@ export class GameEngine {
 
         const frameMs = timestamp - this.lastTimestamp;
         this.lastTimestamp = timestamp;
-
         const deltaTime = Math.min(frameMs / 1000, 0.1);
-        this.elapsed += deltaTime;
 
+        if (this.paused || !this.mapBuilder) {
+            this.publishHud();
+            return;
+        }
+
+        this.elapsed += deltaTime;
         this.trackPerformance(frameMs);
         this.handleActions();
         this.stepSimulation(deltaTime);
         this.updateRace(deltaTime);
 
-        this.mapBuilder.update(this.elapsed);
+        this.mapBuilder.update(this.elapsed, deltaTime);
         this.particles.update(deltaTime);
+        this.trails.update(deltaTime);
         this.updateCamera(deltaTime);
-        this.updateSun();
         this.publishHud();
-
-        this.renderer.render(this.scene, this.camera);
+        this.render(deltaTime);
     };
 
-    /** Physics runs on a fixed step so handling is frame-rate independent. */
-    private stepSimulation(deltaTime: number): void {
-        const canDrive = this.raceManager.canDrive();
-        this.accumulator += deltaTime;
+    private canDrive(): boolean {
+        return this.mode === "attract" || (this.raceManager?.canDrive() ?? false);
+    }
 
+    private stepSimulation(deltaTime: number): void {
+        const canDrive = this.canDrive();
+        for (const driver of this.drivers) driver.setEnabled(canDrive);
+        this.autopilot?.setEnabled(true);
+
+        this.accumulator += deltaTime;
         let steps = 0;
         while (this.accumulator >= PHYSICS_STEP && steps < MAX_SUBSTEPS) {
-            this.carController.update(PHYSICS_STEP, canDrive);
+            for (const car of this.cars) car.update(PHYSICS_STEP, canDrive);
+            resolveCarCollisions(this.cars);
             this.accumulator -= PHYSICS_STEP;
             steps++;
         }
-
         if (steps === MAX_SUBSTEPS) this.accumulator = 0;
+
+        this.handleRespawns();
+
+        const alpha = this.accumulator / PHYSICS_STEP;
+        for (const car of this.cars) car.interpolate(alpha);
+    }
+
+    private handleRespawns(): void {
+        this.cars.forEach((car, index) => {
+            const driver = car.getDriver();
+            const requested = driver instanceof AIDriver && driver.consumeRespawnRequest();
+            if (requested) car.respawn();
+
+            const fell = car.consumeFall();
+            if (fell && index === PLAYER_INDEX && this.mode === "race") this.hudEvents?.onPlayerFell();
+
+            if ((requested || fell) && this.raceManager) {
+                const position = car.getPositionRef();
+                this.raceManager.resync(index, this.mapBuilder!.queryTrack(position.x, position.z).t);
+            }
+        });
     }
 
     private updateRace(deltaTime: number): void {
-        const position = this.carController.getPositionRef();
-        const query = this.mapBuilder.queryTrack(position.x, position.z);
-
-        const events = this.raceManager.update(
-            deltaTime,
-            query,
-            this.carController.getDirectionRef() as THREE.Vector3,
-            this.carController.getSpeed(),
-            this.carController.isOnTrack(),
-        );
-
-        this.mapBuilder.setStartLights(this.raceManager.getStartLights(), this.raceManager.isGo());
-
-        if (events.lapCompleted) {
-            const snapshot = this.raceManager.getSnapshot();
-            this.hudEvents?.onLapCompleted(snapshot.lap, snapshot.lastLap ?? 0, events.newBestLap);
+        const race = this.raceManager;
+        const map = this.mapBuilder!;
+        if (!race) {
+            map.setStartLights(0, true);
+            return;
         }
 
+        this.cars.forEach((car, index) => {
+            const position = car.getPositionRef();
+            const direction = car.getDirectionRef();
+            const query = map.queryTrack(position.x, position.z);
+            const sample = this.racerSamples[index];
+            sample.t = query.t;
+            sample.tangentX = query.tangentX;
+            sample.tangentZ = query.tangentZ;
+            sample.directionX = direction.x;
+            sample.directionZ = direction.z;
+            sample.speed = car.getSpeed();
+            sample.onTrack = car.isOnTrack();
+        });
+
+        const events = race.update(deltaTime, this.racerSamples);
+        map.setStartLights(race.getStartLights(), race.isGo());
+
+        if (events.standingsChanged || events.racerFinished) this.hudState.standingsVersion++;
+
+        const player = race.getRacer(PLAYER_INDEX);
+        if (events.lapCompleted) this.hudEvents?.onLapCompleted(player.lap, player.lastLap ?? 0, events.newBestLap);
+        if (events.finalLap) this.hudEvents?.onFinalLap();
         if (events.raceFinished) {
-            this.hudEvents?.onRaceFinished(this.raceManager.getSnapshot().totalTime);
+            this.handOverToAutopilot();
+            this.hudEvents?.onRaceFinished(player.position);
+        }
+
+        this.applyRubberBand(race);
+    }
+
+    /** After the flag the player's car keeps circulating on its own while the others finish. */
+    private handOverToAutopilot(): void {
+        const map = this.mapBuilder;
+        const player = this.cars[PLAYER_INDEX];
+        if (!map || !player) return;
+
+        this.autopilot = new AIDriver(map, { pace: 0.7, lane: 0, aggression: 0.3, flair: 0 }, () => this.cars);
+        this.autopilot.attach(player);
+        this.autopilot.setEnabled(true);
+        player.setDriver(this.autopilot);
+    }
+
+    /** Rivals ease off when well clear of the player and push when behind, which keeps the pack together. */
+    private applyRubberBand(race: RaceManager): void {
+        if (race.getState() === "countdown") return;
+        for (let i = 0; i < this.drivers.length; i++) {
+            if (i === PLAYER_INDEX) continue;
+            const gap = race.gapToPlayer(i);
+            this.drivers[i].setPaceScale(THREE.MathUtils.clamp(1 - gap * 0.45, 0.88, 1.045));
         }
     }
 
     private handleActions(): void {
+        if (this.mode !== "race") {
+            this.inputManager.consumeAction("toggleCamera");
+            this.inputManager.consumeAction("respawn");
+            return;
+        }
+
         if (this.inputManager.consumeAction("toggleCamera")) {
-            this.toggleCameraMode();
+            this.cycleCamera();
         }
 
-        if (this.inputManager.consumeAction("respawn")) {
-            const t = this.carController.respawn();
-            this.raceManager.resyncTo(t);
-            this.hasCameraState = false;
-        }
-
-        if (this.inputManager.consumeAction("restart")) {
-            this.restart();
-        }
-    }
-
-    public restart(): void {
-        this.carController.resetToStart();
-        this.raceManager.restart();
-        this.hasCameraState = false;
-    }
-
-    private toggleCameraMode(): void {
-        this.cameraMode = this.cameraMode === "follow" ? "free" : "follow";
-        this.controls.enabled = this.cameraMode === "free";
-
-        if (this.cameraMode === "free") {
-            this.controls.target.copy(this.carController.getPositionRef());
-            this.controls.update();
-        } else {
-            this.hasCameraState = false;
+        if (this.inputManager.consumeAction("respawn") && this.raceManager?.canDrive()) {
+            const player = this.cars[PLAYER_INDEX];
+            const t = player.respawn();
+            this.raceManager.resync(PLAYER_INDEX, t);
         }
     }
 
     private updateCamera(deltaTime: number): void {
-        if (this.cameraMode === "free") {
-            const targetBlend = 1 - Math.exp(-5 * deltaTime);
-            this.controls.target.lerp(this.carController.getPositionRef() as THREE.Vector3, targetBlend);
-            this.controls.update();
-            return;
-        }
+        const target = this.mode === "attract" ? this.leadCar() : this.cars[PLAYER_INDEX];
+        if (!target) return;
 
-        this.updateCameraFollow(deltaTime, false);
+        this.cameraRig.update(deltaTime, target, this.groundAt);
+        this.lighting.follow(this.cameraRig.getFocus());
+
+        if (this.postFX) {
+            const mode = this.mode === "attract" ? "attract" : this.cameraRig.getMode();
+            if (mode === "classic") this.postFX.setFocus(0.5, 0.26);
+            else if (mode === "free") this.postFX.setFocus(0.5, 0.5);
+            else if (mode === "attract") this.postFX.setFocus(0.45, 0.17);
+            else this.postFX.setFocus(0.42, 0.2);
+        }
+    }
+
+    private leadCar(): CarController | undefined {
+        return this.cars[PLAYER_INDEX];
+    }
+
+    private render(deltaTime: number): void {
+        if (this.postFX) {
+            this.postFX.render(deltaTime);
+        } else {
+            this.renderer.render(this.scene, this.cameraRig.camera);
+        }
     }
 
     /**
-     * Deliberately static: fixed distance, height, look-ahead and field of view. The camera
-     * only ever tracks the car's position and heading — it never zooms, dollies or shakes on
-     * its own, because a chase cam that moves by itself reads as the game glitching.
+     * Adaptive resolution: drop the render scale when frames run long, and creep back up while
+     * the frame rate holds — but never straight back to a scale that just failed.
      */
-    private updateCameraFollow(deltaTime: number, snap: boolean): void {
-        const position = this.carController.getPositionRef();
-        const direction = this.carController.getDirectionRef();
-
-        // Portrait screens see less width, so lift a little higher to keep the road in frame.
-        const portrait = THREE.MathUtils.clamp((1.0 - this.camera.aspect) / 0.45, 0, 1);
-        const distance = THREE.MathUtils.lerp(CAMERA_DISTANCE, CAMERA_DISTANCE * 0.82, portrait);
-        const height = THREE.MathUtils.lerp(CAMERA_HEIGHT, CAMERA_HEIGHT * 1.12, portrait);
-
-        this._cameraGoal.set(
-            position.x - direction.x * distance,
-            position.y + height,
-            position.z - direction.z * distance,
-        );
-        this._cameraLook.set(
-            position.x + direction.x * CAMERA_LOOK_AHEAD,
-            position.y + 0.9,
-            position.z + direction.z * CAMERA_LOOK_AHEAD,
-        );
-
-        if (snap || !this.hasCameraState) {
-            this.camera.position.copy(this._cameraGoal);
-            this._cameraLookCurrent.copy(this._cameraLook);
-            this.hasCameraState = true;
-        }
-
-        const positionBlend = 1 - Math.exp(-7 * deltaTime);
-        const lookBlend = 1 - Math.exp(-9 * deltaTime);
-        this.camera.position.lerp(this._cameraGoal, positionBlend);
-        this._cameraLookCurrent.lerp(this._cameraLook, lookBlend);
-
-        // Safety net only: from this height terrain almost never intrudes, but the eye must
-        // never end up buried inside a hill.
-        this.liftAboveGround(this.camera.position, 1.5);
-
-        this.camera.lookAt(this._cameraLookCurrent);
-    }
-
-    private liftAboveGround(point: THREE.Vector3, clearance: number): void {
-        const floor = this.mapBuilder.getSurfaceHeightAt(point.x, point.z) + clearance;
-        if (point.y < floor) point.y = floor;
-    }
-
-    private updateSun(): void {
-        const position = this.carController.getPositionRef();
-
-        // Snapping the shadow frustum to texel boundaries stops shadow edges crawling as the car moves.
-        const texel = (this.quality.shadowRadius * 2) / this.quality.shadowMapSize;
-        const targetX = Math.round(position.x / texel) * texel;
-        const targetZ = Math.round(position.z / texel) * texel;
-        const targetY = Math.round(position.y / texel) * texel;
-
-        this.sunLight.target.position.set(targetX, targetY, targetZ);
-        this.sunLight.target.updateMatrixWorld();
-        this.sunLight.position.set(
-            targetX + this._sunOffset.x,
-            targetY + this._sunOffset.y,
-            targetZ + this._sunOffset.z,
-        );
-        this.sunLight.updateMatrixWorld();
-    }
-
     private trackPerformance(frameMs: number): void {
         this.frameTimeAverage += (frameMs - this.frameTimeAverage) * 0.06;
         this.fpsAverage += (1000 / Math.max(frameMs, 1) - this.fpsAverage) * 0.06;
         this.qualitySamples++;
+        this.failedScaleAge += frameMs;
 
+        if (this.failedScaleAge > 30000) this.failedScale = Infinity;
         if (this.qualitySamples < 90) return;
         this.qualitySamples = 0;
 
-        // Trade resolution for frame rate before anything else — it is the least visible knob.
-        if (this.frameTimeAverage > 23 && this.renderScale > 0.62) {
-            this.renderScale = Math.max(0.62, this.renderScale - 0.12);
+        if (this.frameTimeAverage > 20 && this.renderScale > 0.6) {
+            this.failedScale = this.renderScale;
+            this.failedScaleAge = 0;
+            this.renderScale = Math.max(0.6, this.renderScale - 0.1);
             this.applyPixelRatio();
-        } else if (this.frameTimeAverage < 13.5 && this.renderScale < 1) {
-            this.renderScale = Math.min(1, this.renderScale + 0.08);
-            this.applyPixelRatio();
+        } else if (this.frameTimeAverage < 17.6 && this.renderScale < 1) {
+            const next = Math.min(1, this.renderScale + 0.05);
+            if (next < this.failedScale - 0.01) {
+                this.renderScale = next;
+                this.applyPixelRatio();
+            }
         }
     }
 
     private applyPixelRatio(): void {
         const devicePixelRatio = Math.min(window.devicePixelRatio || 1, this.quality.maxPixelRatio);
-        this.renderer.setPixelRatio(devicePixelRatio * this.renderScale);
+        const ratio = devicePixelRatio * this.renderScale;
+        this.renderer.setPixelRatio(ratio);
+
+        const size = this.renderer.getSize(new THREE.Vector2());
+        this.postFX?.setSize(size.x, size.y, ratio);
+        this.particles.setViewport(this.renderer.domElement.height, THREE.MathUtils.degToRad(this.cameraRig.camera.fov));
     }
 
     private publishHud(): void {
         if (!this.hudListener) return;
 
-        const race = this.raceManager.getSnapshot();
         const state = this.hudState;
+        const player = this.cars[PLAYER_INDEX];
+        const race = this.raceManager;
 
-        state.speedKph = this.carController.getSpeedKph();
-        state.boost = this.carController.getBoostCharge();
-        state.drifting = this.carController.isDrifting();
-        state.airborne = this.carController.isAirborne();
-        state.onTrack = this.carController.isOnTrack();
-        state.lap = race.lap;
-        state.totalLaps = race.totalLaps;
-        state.lapTime = race.lapTime;
-        state.lastLap = race.lastLap;
-        state.bestLap = race.bestLap;
-        state.totalTime = race.totalTime;
-        state.raceState = race.state;
-        state.countdown = race.countdown;
-        state.wrongWay = race.wrongWay;
+        state.mode = this.mode;
+        state.paused = this.paused;
         state.fps = this.fpsAverage;
+        state.cameraMode = this.cameraRig.getMode();
+
+        this.cars.forEach((car, index) => {
+            const position = car.getPositionRef();
+            state.carPositions[index * 2] = position.x;
+            state.carPositions[index * 2 + 1] = position.z;
+        });
+
+        if (player) {
+            state.speedKph = player.getSpeedKph();
+            state.boost = player.getBoostCharge();
+            state.boosting = player.isBoosting();
+            state.drifting = player.isDrifting();
+            state.airborne = player.isAirborne();
+            state.onTrack = player.isOnTrack();
+        }
+
+        if (race) {
+            const status = race.getRacer(PLAYER_INDEX);
+            state.lap = Math.min(status.lap, race.totalLaps);
+            state.totalLaps = race.totalLaps;
+            state.lapTime = status.lapTime;
+            state.lastLap = status.lastLap;
+            state.bestLap = status.bestLap;
+            state.recordLap = race.getRecordLap();
+            state.totalTime = status.totalTime;
+            state.raceState = race.getState();
+            state.countdown = race.getCountdown();
+            state.wrongWay = race.isWrongWay();
+            state.position = status.position;
+        }
 
         this.hudListener(state);
     }
@@ -447,14 +645,9 @@ export class GameEngine {
         const width = Math.max(1, container.clientWidth);
         const height = Math.max(1, container.clientHeight);
 
-        this.camera.aspect = width / height;
-        this.camera.updateProjectionMatrix();
-        this.applyPixelRatio();
+        this.cameraRig.resize(width / height);
         this.renderer.setSize(width, height);
-        this.particles.setViewport(
-            this.renderer.domElement.height,
-            THREE.MathUtils.degToRad(this.camera.fov),
-        );
+        this.applyPixelRatio();
     }
 
     public dispose(): void {
@@ -471,20 +664,15 @@ export class GameEngine {
         this.hudListener = null;
         this.hudEvents = null;
 
+        this.unloadTrack();
         this.inputManager.dispose();
-        this.carController.dispose();
-        this.mapBuilder.dispose();
 
         this.scene.remove(this.particles.points);
         this.particles.dispose();
-
-        for (const light of this.lights) {
-            this.scene.remove(light);
-            if (light instanceof THREE.Light) light.dispose();
-        }
-        this.lights.length = 0;
-
-        this.controls.dispose();
+        this.trails.dispose();
+        this.lighting.dispose();
+        this.cameraRig.dispose();
+        this.postFX?.dispose();
         this.renderer.dispose();
         this.renderer.domElement.parentElement?.removeChild(this.renderer.domElement);
     }

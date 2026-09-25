@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { TrackLayout } from "../tracks/types";
 
 export interface TrackSample {
     x: number;
@@ -9,6 +10,14 @@ export interface TrackSample {
     curvature: number;
     bank: number;
     arc: number;
+}
+
+export interface TrackPoint {
+    x: number;
+    z: number;
+    tangentX: number;
+    tangentZ: number;
+    curvature: number;
 }
 
 export interface TrackQuery {
@@ -24,20 +33,6 @@ export interface TrackQuery {
     tangentZ: number;
     curvature: number;
 }
-
-/** Angle (deg) / radius pairs. Strictly increasing angles keep the loop star-shaped, so it can never self-intersect. */
-const LAYOUT: readonly (readonly [number, number])[] = [
-    [0, 80], [20, 78], [42, 70], [60, 55], [76, 47], [95, 51],
-    [115, 66], [135, 74], [158, 71], [178, 59], [196, 46], [212, 44],
-    [232, 55], [254, 70], [276, 80], [300, 83], [325, 85], [348, 82],
-];
-
-/** Gaussian bumps layered onto the elevation profile to give the lap real character. */
-const ELEVATION_FEATURES: readonly { t: number; amplitude: number; width: number }[] = [
-    { t: 0.28, amplitude: 3.0, width: 0.032 },
-    { t: 0.55, amplitude: -2.4, width: 0.05 },
-    { t: 0.78, amplitude: 1.9, width: 0.035 },
-];
 
 const SAMPLE_COUNT = 768;
 const CELL_SIZE = 5;
@@ -67,8 +62,8 @@ export class TrackPath {
         curvature: 0,
     };
 
-    constructor(baseHeightAt: (x: number, z: number) => number) {
-        const controlPoints = LAYOUT.map(([degrees, radius]) => {
+    constructor(private readonly layout: TrackLayout, baseHeightAt: (x: number, z: number) => number) {
+        const controlPoints = layout.points.map(([degrees, radius]) => {
             const angle = (degrees * Math.PI) / 180;
             return new THREE.Vector3(Math.cos(angle) * radius, 0, Math.sin(angle) * radius);
         });
@@ -164,15 +159,17 @@ export class TrackPath {
         const count = this.samples.length;
         const elevation = new Float32Array(count);
 
-        for (let i = 0; i < count; i++) {
-            elevation[i] = baseHeightAt(this.samples[i].x, this.samples[i].z);
+        if (this.layout.followTerrain) {
+            for (let i = 0; i < count; i++) {
+                elevation[i] = baseHeightAt(this.samples[i].x, this.samples[i].z);
+            }
         }
 
         let profile = smoothCircular(elevation, 46, 3);
 
         for (let i = 0; i < count; i++) {
             const t = i / count;
-            for (const feature of ELEVATION_FEATURES) {
+            for (const feature of this.layout.elevationFeatures) {
                 let delta = t - feature.t;
                 if (delta > 0.5) delta -= 1;
                 if (delta < -0.5) delta += 1;
@@ -222,7 +219,7 @@ export class TrackPath {
 
         for (let i = 0; i < count; i++) {
             // Tight corners lean harder, but never past a slope the car can climb back out of.
-            raw[i] = THREE.MathUtils.clamp(this.samples[i].curvature * 4.6, -MAX_BANK_SLOPE, MAX_BANK_SLOPE);
+            raw[i] = THREE.MathUtils.clamp(this.samples[i].curvature * 4.6 * this.layout.bankScale, -MAX_BANK_SLOPE, MAX_BANK_SLOPE);
         }
 
         const smoothed = smoothCircular(raw, 18, 2);
@@ -391,6 +388,42 @@ export class TrackPath {
         const count = this.samples.length;
         const wrapped = ((t % 1) + 1) % 1;
         return this.samples[Math.min(count - 1, Math.floor(wrapped * count))];
+    }
+
+    /** Interpolated centreline frame at a distance along the lap (wraps), shifted `lateral` units to the right. */
+    public pointAtArc(arc: number, lateral: number, out: TrackPoint): TrackPoint {
+        const count = this.samples.length;
+        const u = (((arc / this.totalLength) % 1) + 1) % 1 * count;
+        const index = Math.floor(u) % count;
+        const frac = u - Math.floor(u);
+        const a = this.samples[index];
+        const b = this.samples[(index + 1) % count];
+
+        const tx = a.tangentX + (b.tangentX - a.tangentX) * frac;
+        const tz = a.tangentZ + (b.tangentZ - a.tangentZ) * frac;
+        const length = Math.hypot(tx, tz) || 1;
+
+        out.tangentX = tx / length;
+        out.tangentZ = tz / length;
+        out.x = a.x + (b.x - a.x) * frac - out.tangentZ * lateral;
+        out.z = a.z + (b.z - a.z) * frac + out.tangentX * lateral;
+        out.curvature = a.curvature + (b.curvature - a.curvature) * frac;
+        return out;
+    }
+
+    /** Signed curvature with the largest magnitude over a stretch of road ahead. */
+    public peakCurvatureAhead(arc: number, distance: number): number {
+        const count = this.samples.length;
+        const step = this.totalLength / count;
+        const start = Math.floor((((arc / this.totalLength) % 1) + 1) % 1 * count);
+        const span = Math.max(1, Math.ceil(distance / step));
+
+        let peak = 0;
+        for (let k = 0; k <= span; k++) {
+            const curvature = this.samples[(start + k) % count].curvature;
+            if (Math.abs(curvature) > Math.abs(peak)) peak = curvature;
+        }
+        return peak;
     }
 
     /** Surface height on the road at a given lateral offset, including corner banking. */

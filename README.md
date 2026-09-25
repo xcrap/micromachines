@@ -1,64 +1,48 @@
-# MicroMachines
+# Micro Machines 3D
 
-A fun and exciting car racing game built with vibe coding, no actual coding was harm during the creation of this experiment.
+Tiny toy cars, giant everyday tracks. A browser racer in the spirit of the classic Micro Machines games, built with React, Three.js and TypeScript.
 
-## Description
+## Tracks
 
-MicroMachines is an attempt to revive an old racing game where players can drive cars around various tracks, compete against AI opponents, and challenge their racing skills. The game focuses on fast-paced racing action with simple yet engaging mechanics.
+- **Breakfast Bends** — a lap of the kitchen table. The course is lined with cereal hoops you can plough through, there is spilt milk, juice and jam to slide or stick in, and the edge of the table is a long way down.
+- **Backyard Rally** — a dirt path through a lawn that towers over the cars: giant flowers, a football, flowerpots and toy bricks, all fenced in by a garden fence the size of a skyscraper.
 
-## TODO Priority
-- (*) Fix Trailing in top of decoration elements, should render only on top of ground/track and not hills, trees, etc
-- (*) Make Drift with Spacebar a real drift and not a break, reduce left right steering for more realistic driving.
-- () Increase the height to look more a terrain, maybe add some bumps to the track itself?
-- () Add Physics to the car so he can jump and drift. 
-- () Add Sound Effects
-- () Fix Bugs
-- () Remove non used code
-- () Improve performance.
-
-## TODO Long Term
-
-- Multiple race tracks with different difficulties
-- Various car models with unique handling characteristics
-- Single player mode against AI opponents
-- Local multiplayer support
-- Customizable cars and racing settings
-- Physics-based driving mechanics
-- Dynamic weather effects
-
-## Installation
-
-### Prerequisites
-
-- Node.js (v14 or higher)
-- Modern web browser with WebGL support
-
-### Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/micromachines.git
-
-# Navigate to project directory
-cd micromachines
-
-# Install dependencies
-bun install
-
-# Start the game
-bun run dev
-```
+Each race is three laps against three AI rivals — Dash, Violet and Buck — who each have their own pace, racing line and appetite for drifting. You start at the back of the grid.
 
 ## How to Play
 
-Launch the game and navigate through the menu to select your preferred game mode, track, and vehicle. The game supports both keyboard controls and gamepads.
+| Key | Action |
+| --- | --- |
+| ↑ / ↓ (or W / S, Q / A) | Accelerate / brake and reverse |
+| ← / → (or O / P) | Steer |
+| Space | Handbrake drift — drifting fills the boost meter |
+| Shift | Boost |
+| R | Put the car back on the track |
+| C | Cycle camera: chase, classic top-down, free orbit |
+| Esc | Pause |
 
-### Controls
+Gamepads work too: right trigger to accelerate, left trigger to brake, A to drift, B or RB to boost.
 
-- **Arrow keys/OPQA**: Drive the car
-- **Space**: Handbrake
-- **C**: Change View (Control with Mouse)
+Bumping rivals is allowed. Falling off the table is not recommended.
 
-## Contributing
+## Development
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+```bash
+bun install      # or npm install
+bun run dev      # start the dev server
+bun run build    # production build
+npx tsc --noEmit -p tsconfig.app.json   # typecheck
+```
+
+`/preview.html?track=breakfast&view=chase&t=0.3` opens a dev-only viewer for a single track (views: `chase`, `top`, `orbit`; `[` and `]` step around the lap).
+
+### Adding a track
+
+Tracks live in `src/game/tracks/<name>/` and implement the `TrackTheme` interface from `src/game/tracks/types.ts`: a lap layout, a height function, surfaces, lighting, and a `build()` that returns meshes, obstacles, surface patches (puddles, spills) and pushable debris. Register it in `src/game/tracks/index.ts` and it appears on the title screen.
+
+## Ideas for later
+
+- Sound: engines, skids, bumps and a countdown
+- More tracks (bath tub, pool table, school desk)
+- Local split-screen or head-to-head elimination mode
+- Touch controls

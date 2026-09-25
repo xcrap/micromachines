@@ -33,54 +33,46 @@ const TRACK_FRAGMENT_COLOR = /* glsl */ `
 {
     vec2 wp = vWorldPosition.xz;
     float absOffset = abs(vOffset);
-    float detailFade = 1.0 - smoothstep(30.0, 110.0, vViewDepth);
+    float near = 1.0 - smoothstep(24.0, 80.0, vViewDepth);
 
-    vec3 dirtDark  = vec3(0.196, 0.137, 0.086);
-    vec3 dirtMid   = vec3(0.325, 0.235, 0.153);
-    vec3 dirtLight = vec3(0.435, 0.333, 0.231);
-    vec3 dust      = vec3(0.541, 0.451, 0.341);
-    vec3 gravel    = vec3(0.427, 0.408, 0.376);
+    vec3 dirtDark  = vec3(0.165, 0.105, 0.058);
+    vec3 dirtMid   = vec3(0.290, 0.195, 0.115);
+    vec3 dirtLight = vec3(0.395, 0.285, 0.180);
+    vec3 dust      = vec3(0.480, 0.380, 0.260);
 
-    float coarse = mm_fbm(wp * 0.09, 4);
-    float medium = mm_fbm(wp * 0.34, 4);
-    float fine   = mm_fbm(wp * 1.1, 3);
+    float coarse = mm_fbm(wp * 0.07, 2);
+    float medium = mm_noise(wp * 0.31);
 
-    vec3 color = mix(dirtDark, dirtMid, smoothstep(0.24, 0.62, coarse));
-    color = mix(color, dirtLight, smoothstep(0.46, 0.82, medium) * 0.7);
-    color += (fine - 0.5) * 0.07 * detailFade;
+    vec3 color = mix(dirtDark, dirtMid, smoothstep(0.22, 0.7, coarse));
+    color = mix(color, dirtLight, smoothstep(0.45, 0.85, medium) * 0.6);
 
-    // Polished racing line: two compacted, darker grooves either side of centre.
-    float groove = exp(-pow((absOffset - 2.15) * 1.35, 2.0));
-    float grooveWear = groove * (0.55 + 0.45 * mm_noise(vec2(vArc * 0.35, vOffset * 0.6)));
-    color = mix(color, dirtDark * 0.86, grooveWear * 0.55);
+    // Packed, darker ruts either side of centre where the racing line runs.
+    float rut = exp(-pow((absOffset - 2.15) * 1.35, 2.0));
+    float rutNoise = mm_noise(vec2(vArc * 0.3, vOffset * 0.5));
+    color = mix(color, dirtDark * 0.88, rut * (0.45 + 0.45 * rutNoise) * 0.5);
 
-    // Loose material pushed to the outside of the road.
+    // Loose, sun-dried material thrown to the outside of the path.
     float looseEdge = smoothstep(uHalfWidth - 2.6, uHalfWidth + 0.4, absOffset);
-    float gravelCells = mm_voronoi(wp * 2.6);
-    color = mix(color, gravel * (0.78 + gravelCells * 0.45), looseEdge * 0.42);
-    color = mix(color, dust, looseEdge * smoothstep(0.55, 0.85, mm_fbm(wp * 0.22 + vec2(31.0, 11.0), 3)) * 0.4);
+    color = mix(color, dust, looseEdge * (0.3 + medium * 0.3));
 
-    // Scattered pebbles and dried cracks.
-    float pebbles = smoothstep(0.80, 0.90, mm_noise(wp * 4.2 + vec2(44.0, 17.0)));
-    color = mix(color, gravel * 1.08, pebbles * 0.3 * detailFade);
+    if (near > 0.001) {
+        float fine = mm_noise(wp * 1.7);
+        float grit = mm_noise(wp * 5.3 + vec2(44.0, 17.0));
+        color += (fine - 0.5) * 0.09 * near;
+        color = mix(color, dust, smoothstep(0.86, 0.96, grit) * 0.22 * near);
+        color *= 1.0 - smoothstep(0.82, 0.95, 1.0 - grit) * 0.22 * near;
+    }
 
-    float cracks = smoothstep(0.03, 0.09, mm_voronoi(wp * 1.4 + vec2(55.0, 33.0)));
-    float crackMask = smoothstep(0.58, 0.80, mm_fbm(wp * 0.16, 3));
-    color *= mix(1.0, 0.82 + cracks * 0.18, crackMask * 0.55 * detailFade);
+    diffuseColor.rgb = color;
 
-    // Damp, dark patches.
-    float damp = smoothstep(0.62, 0.80, mm_fbm(wp * 0.13 + vec2(15.0, 25.0), 4));
-    color = mix(color, dirtDark * 0.78, damp * 0.35);
-
-    float ao = 0.93 + fine * 0.07;
-    diffuseColor.rgb = color * ao;
-
-    // Ragged, noise-eaten border so the road never reads as a hard-edged decal.
-    float edge = 1.0 - smoothstep(uHalfWidth, uHalfWidth + uBleed, absOffset);
-    float border = mm_fbm(wp * 0.85 + vec2(77.0, 33.0), 4) * 0.62
-                 + mm_noise(wp * 3.4) * 0.24
-                 + mm_noise(wp * 9.0) * 0.10;
-    diffuseColor.a = smoothstep(0.06, 0.52, edge + (border - 0.48) * 0.9);
+    // Ragged, noise-eaten border so the path never reads as a hard-edged decal.
+    float alpha = 1.0;
+    if (absOffset > uHalfWidth - 0.6) {
+        float edge = 1.0 - smoothstep(uHalfWidth, uHalfWidth + uBleed, absOffset);
+        float border = mm_fbm(wp * 0.8 + vec2(77.0, 33.0), 2) * 0.7 + mm_noise(wp * 3.4) * 0.3;
+        alpha = smoothstep(0.06, 0.52, edge + (border - 0.48) * 0.9);
+    }
+    diffuseColor.a = alpha;
     if (diffuseColor.a < 0.02) discard;
 }
 `;

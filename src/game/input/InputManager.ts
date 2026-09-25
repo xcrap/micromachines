@@ -7,7 +7,13 @@ export interface DriveInput {
     boost: boolean;
 }
 
-export type InputAction = "toggleCamera" | "respawn" | "restart" | "togglePause";
+/** Anything that can drive a car: the keyboard/gamepad, or an AI. */
+export interface DriveInputSource {
+    sample(): Readonly<DriveInput>;
+}
+
+/** Pause, restart and menu keys belong to the UI layer; the engine only handles in-race actions. */
+export type InputAction = "toggleCamera" | "respawn";
 
 const PREVENTED_KEYS = new Set([
     "arrowup", "arrowdown", "arrowleft", "arrowright", " ", "q", "a", "o", "p", "w", "s", "d", "shift",
@@ -16,12 +22,9 @@ const PREVENTED_KEYS = new Set([
 const ACTION_KEYS: Record<string, InputAction> = {
     c: "toggleCamera",
     r: "respawn",
-    enter: "restart",
-    escape: "togglePause",
-    p: "togglePause",
 };
 
-export class InputManager {
+export class InputManager implements DriveInputSource {
     private readonly keys = new Set<string>();
     private readonly pendingActions = new Set<InputAction>();
     private gamepadIndex: number | null = null;
@@ -36,11 +39,8 @@ export class InputManager {
 
         this.keys.add(key);
 
-        // "p" doubles as steer-right, so only treat it as pause when nothing else claims it.
         const action = ACTION_KEYS[key];
-        if (action && (key !== "p" || event.shiftKey)) {
-            this.pendingActions.add(action);
-        }
+        if (action) this.pendingActions.add(action);
     };
 
     private handleKeyUp = (event: KeyboardEvent): void => {

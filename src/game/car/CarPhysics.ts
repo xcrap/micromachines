@@ -16,9 +16,6 @@ export interface SurfaceState {
     speedScale: number;
 }
 
-export const TRACK_SURFACE: SurfaceState = { grip: 1, drag: 0, speedScale: 1 };
-export const GRASS_SURFACE: SurfaceState = { grip: 0.62, drag: 5.5, speedScale: 0.58 };
-
 export class CarPhysics {
     private velocity = 0;
     private lateralVelocity = 0;
@@ -40,6 +37,7 @@ export class CarPhysics {
     private readonly BRAKING = 26;
     private readonly COAST_DRAG = 5.5;
     private readonly DRIFT_DRAG = 2.6;
+    private readonly OVERSPEED_DRAG = 32;
 
     private readonly MAX_STEERING = 0.16;
     private readonly STEERING_SPEED = 10;
@@ -103,7 +101,12 @@ export class CarPhysics {
             this.velocity = approach(this.velocity, 0, surface.drag, deltaTime);
         }
 
-        this.velocity = clamp(this.velocity, this.MAX_REVERSE_SPEED, topSpeed);
+        // Running faster than this surface allows (boost running out, rolling onto grass or jam)
+        // bleeds off quickly but smoothly; a hard clamp cut it in a single step and jolted the car.
+        if (this.velocity > topSpeed) {
+            this.velocity = Math.max(topSpeed, this.velocity - this.OVERSPEED_DRAG * deltaTime);
+        }
+        this.velocity = clamp(this.velocity, this.MAX_REVERSE_SPEED, this.MAX_SPEED + this.BOOST_SPEED_BONUS);
         this.engineLoad = clamp(Math.abs(this.velocity) / this.MAX_SPEED + (throttle > 0 ? 0.15 : 0), 0, 1.3);
 
         const steerInput = clamp(input.steer, -1, 1);
@@ -215,7 +218,15 @@ export class CarPhysics {
         this.velocity *= factor;
     }
 
-    public reset(): void {
+    /** Car-local velocity change from a bump: along the nose, to the right, and a yaw kick. */
+    public applyImpulse(forward: number, lateral: number, yaw: number): void {
+        this.velocity = clamp(this.velocity + forward, this.MAX_REVERSE_SPEED * 1.5, this.MAX_SPEED + this.BOOST_SPEED_BONUS);
+        this.lateralVelocity = clamp(this.lateralVelocity + lateral, -this.MAX_LATERAL * 1.4, this.MAX_LATERAL * 1.4);
+        this.yawRate += yaw;
+    }
+
+    public reset(keepBoost = true): void {
+        if (!keepBoost) this.boostCharge = 0;
         this.velocity = 0;
         this.lateralVelocity = 0;
         this.steeringAngle = 0;
@@ -237,6 +248,7 @@ export class CarPhysics {
     public getBoostCharge(): number { return this.boostCharge; }
     public isBoosting(): boolean { return this.boostActive; }
     public getEngineLoad(): number { return this.engineLoad; }
+    public getMaxSpeed(): number { return this.MAX_SPEED; }
 }
 
 function clamp(value: number, min: number, max: number): number {
