@@ -28,10 +28,10 @@ Bumping rivals is allowed. Falling off the table is not recommended.
 ## Development
 
 ```bash
-bun install      # or npm install
-bun run dev      # start the dev server
-bun run build    # production build
-npx tsc --noEmit -p tsconfig.app.json   # typecheck
+bun install        # or npm install
+bun run dev        # start the dev server
+bun run build      # production build
+bun run typecheck  # typecheck (TypeScript 7)
 ```
 
 `/preview.html?track=breakfast&view=chase&t=0.3` opens a dev-only viewer for a single track (views: `chase`, `top`, `orbit`; `[` and `]` step around the lap).

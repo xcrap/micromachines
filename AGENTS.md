@@ -4,13 +4,13 @@
 
 - **Dev server:** `npm run dev`
 - **Build:** `npm run build`
-- **Typecheck:** `npx tsc --noEmit`
+- **Typecheck:** `npm run typecheck` (the root `tsconfig.json` only holds references, so plain `tsc --noEmit` checks nothing)
 
 Always run typecheck after making changes.
 
 ## Tech Stack
 
-- React 19, TypeScript, Three.js
+- React 19, TypeScript 7, Three.js
 - Vite, Tailwind CSS 4, PostCSS
 
 ## Project Structure
