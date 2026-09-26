@@ -281,7 +281,7 @@ function createBannerTexture(): THREE.Texture {
     ctx.font = "128px Bungee, Impact, system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("MICRO MACHINES", width / 2, 116);
+    ctx.fillText("MINI MACHINES", width / 2, 116);
 
     // Recessed sockets for the start lights, painted into the sign so the emissive
     // lenses read as part of it rather than as bulbs bolted underneath.

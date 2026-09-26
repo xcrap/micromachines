@@ -1,4 +1,4 @@
-# Micro Machines 3D
+# Mini Machines 3D
 
 ## Commands
 

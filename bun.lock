@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "micro-machines-3d",
+      "name": "mini-machines-3d",
       "dependencies": {
         "react": "^19.3.0",
         "react-dom": "^19.3.0",

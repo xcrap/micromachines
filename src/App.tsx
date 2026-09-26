@@ -279,7 +279,7 @@ function App() {
 
             {!ready && (
                 <div className="absolute inset-0 flex items-center justify-center">
-                    <span className="logo-type -rotate-3 text-[clamp(40px,6vw,72px)]">MICRO MACHINES</span>
+                    <span className="logo-type -rotate-3 text-[clamp(40px,6vw,72px)]">MINI MACHINES</span>
                 </div>
             )}
 

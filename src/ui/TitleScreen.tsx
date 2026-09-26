@@ -28,7 +28,7 @@ export function TitleScreen({ tracks, selected, rivals, onSelect, onStart }: Tit
         <div className="pointer-events-none absolute inset-0 select-none font-body">
             <div className="pointer-events-auto absolute left-[clamp(16px,4vw,64px)] top-[clamp(16px,5vh,56px)] flex max-w-[min(34rem,calc(100vw-32px))] flex-col">
                 <h1 className="logo-type animate-rise -rotate-3 text-[clamp(44px,7.2vw,92px)]">
-                    MICRO
+                    MINI
                     <br />
                     MACHINES
                 </h1>

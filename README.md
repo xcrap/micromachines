@@ -1,4 +1,4 @@
-# Micro Machines 3D
+# Mini Machines 3D
 
 Tiny toy cars, giant everyday tracks. A browser racer in the spirit of the classic Micro Machines games, built with React, Three.js and TypeScript.
 

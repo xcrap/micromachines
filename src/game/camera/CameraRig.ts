@@ -14,7 +14,7 @@ export interface CameraTarget {
 const FOV = 44;
 
 /**
- * High and far back on purpose: the appeal of Micro Machines is tiny cars on a big track.
+ * High and far back on purpose: the appeal of Mini Machines is tiny cars on a big track.
  * Every mode is deliberately static — fixed distance, height and field of view. The camera only
  * tracks the car's position and heading; it never zooms, dollies or shakes on its own, because
  * a camera that moves by itself reads as the game glitching.
